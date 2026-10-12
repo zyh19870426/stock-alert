@@ -1,0 +1,63 @@
+{
+  "0.002415": {
+    "met": false,
+    "lastSent": 0
+  },
+  "1.600733": {
+    "met": false,
+    "lastSent": 0
+  },
+  "1.601127": {
+    "met": false,
+    "lastSent": 0
+  },
+  "0.002714": {
+    "met": false,
+    "lastSent": 0
+  },
+  "1.600058": {
+    "met": false,
+    "lastSent": 0
+  },
+  "0.002594": {
+    "met": false,
+    "lastSent": 0
+  },
+  "0.002456": {
+    "met": false,
+    "lastSent": 0
+  },
+  "1.600611": {
+    "met": false,
+    "lastSent": 0
+  },
+  "0.300433": {
+    "met": true,
+    "lastSent": 1791510025903,
+    "fireCount": 2,
+    "firstFire": {
+      "price": 30,
+      "at": 1791438370675
+    },
+    "lastFire": {
+      "price": 28.63,
+      "at": 1791528151208
+    }
+  },
+  "1.600309": {
+    "met": false,
+    "lastSent": 0
+  },
+  "0.002354": {
+    "met": false,
+    "lastSent": 0
+  },
+  "1.600869": {
+    "met": false,
+    "lastSent": 0
+  },
+  "1.603990": {
+    "met": false,
+    "lastSent": 0
+  }
+}

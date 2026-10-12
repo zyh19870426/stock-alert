@@ -1,0 +1,31 @@
+name: probe-em
+
+# 一次性探针：在 Actions 的干净出口 IP 上实测东财各接口的可用性。
+# 用途：定「解决东财被封」的方案分支（云端预生成 vs 代理中转 vs 换源）。
+# 结果只看 job 日志；跑完即可删除本文件。
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: '每个接口请求次数'
+        required: false
+        default: '6'
+      gap:
+        description: '请求间隔 ms'
+        required: false
+        default: '700'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 探测东财接口
+        env:
+          ROUNDS: ${{ github.event.inputs.rounds }}
+          GAP: ${{ github.event.inputs.gap }}
+        run: node probe-em.js

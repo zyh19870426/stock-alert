@@ -1,0 +1,215 @@
+{
+  "_说明": "云端(GitHub Actions)版配置。sendKey 留空即可——推送钥匙存在仓库的 Secret（名字叫 SENDKEY）里。手机端用网页控制台编辑：stocks 是正在监控的，deleted 是删除记录（含触发价，供查看触发后涨跌幅）。",
+  "channel": "serverchan",
+  "sendKey": "",
+  "cooldownMinutes": 30,
+  "test": false,
+  "stocks": [
+    {
+      "code": "002415",
+      "name": "海康威视",
+      "condition": "lte",
+      "target": 31,
+      "enabled": true,
+      "addedAt": "2026-09-15"
+    },
+    {
+      "code": "600733",
+      "name": "北汽蓝谷",
+      "condition": "lte",
+      "target": 3,
+      "enabled": true,
+      "addedAt": "2026-09-15"
+    },
+    {
+      "code": "601127",
+      "name": "赛力斯",
+      "condition": "lte",
+      "target": 31,
+      "enabled": true,
+      "addedAt": "2026-09-16"
+    },
+    {
+      "code": "002714",
+      "name": "牧原股份",
+      "condition": "lte",
+      "target": 39,
+      "enabled": true,
+      "addedAt": "2026-09-16"
+    },
+    {
+      "code": "600058",
+      "name": "五矿发展",
+      "condition": "lte",
+      "target": 7.5,
+      "enabled": true,
+      "addedAt": "2026-09-16"
+    },
+    {
+      "code": "002594",
+      "name": "比亚迪",
+      "condition": "lte",
+      "target": 81.5,
+      "enabled": true,
+      "addedAt": "2026-09-17"
+    },
+    {
+      "code": "002456",
+      "name": "欧菲光",
+      "condition": "lte",
+      "target": 5.5,
+      "enabled": true,
+      "addedAt": "2026-09-20"
+    },
+    {
+      "code": "600611",
+      "name": "大众交通",
+      "condition": "lte",
+      "target": 4.1,
+      "enabled": true,
+      "addedAt": "2026-09-21"
+    },
+    {
+      "code": "600309",
+      "name": "万华化学",
+      "condition": "lte",
+      "target": 60,
+      "enabled": false,
+      "addedAt": "2026-09-23"
+    },
+    {
+      "code": "002354",
+      "name": "天娱数科",
+      "condition": "lte",
+      "target": 6,
+      "enabled": true,
+      "addedAt": "2026-09-23"
+    },
+    {
+      "code": "600869",
+      "name": "远东股份",
+      "condition": "lte",
+      "target": 14.5,
+      "enabled": true,
+      "addedAt": "2026-09-25"
+    },
+    {
+      "code": "603990",
+      "name": "麦迪科技",
+      "condition": "lte",
+      "target": 17,
+      "enabled": true,
+      "addedAt": "2026-09-26"
+    }
+  ],
+  "deleted": [
+    {
+      "code": "300433",
+      "name": "蓝思科技",
+      "condition": "lte",
+      "target": 26,
+      "addedAt": "2026-09-22",
+      "removedAt": "2026-10-10T08:55:14.073Z",
+      "fire": {
+        "firstPrice": 30,
+        "firstAt": 1791438370675,
+        "lastPrice": 28.63,
+        "lastAt": 1791528151208,
+        "count": 2
+      }
+    }
+  ],
+  "holdings": [
+    {
+      "code": "000155",
+      "name": "川能动力",
+      "cost": 14,
+      "qty": 1000,
+      "addedAt": null
+    },
+    {
+      "code": "000762",
+      "name": "西藏矿业",
+      "cost": 30,
+      "qty": 1000,
+      "addedAt": null
+    },
+    {
+      "code": "000767",
+      "name": "晋控电力",
+      "cost": 5,
+      "qty": 1000,
+      "addedAt": null
+    },
+    {
+      "code": "300132",
+      "name": "诺斯贝尔",
+      "cost": 6,
+      "qty": 100,
+      "addedAt": null
+    },
+    {
+      "code": "002577",
+      "name": "雷柏科技",
+      "cost": 18,
+      "qty": 1000,
+      "addedAt": null
+    },
+    {
+      "code": "000697",
+      "name": "炼石航空",
+      "cost": 0,
+      "qty": 0,
+      "addedAt": null
+    },
+    {
+      "code": "002415",
+      "name": "海康威视",
+      "cost": 0,
+      "qty": 0,
+      "addedAt": null
+    },
+    {
+      "code": "002301",
+      "name": "齐心集团",
+      "cost": 0,
+      "qty": 0,
+      "addedAt": null
+    },
+    {
+      "code": "600611",
+      "name": "大众交通",
+      "cost": 0,
+      "qty": 0,
+      "addedAt": null
+    },
+    {
+      "code": "002614",
+      "name": "奥佳华",
+      "cost": 0,
+      "qty": 0,
+      "addedAt": null
+    },
+    {
+      "code": "603099",
+      "name": "长白山",
+      "cost": 0,
+      "qty": 0,
+      "addedAt": null
+    },
+    {
+      "code": "600869",
+      "name": "远东股份",
+      "cost": 0,
+      "qty": 0,
+      "addedAt": null
+    },
+    {
+      "code": "002303",
+      "name": "美盈森",
+      "cost": 0,
+      "qty": 0,
+      "addedAt": null
+    }
+  ]
+}
