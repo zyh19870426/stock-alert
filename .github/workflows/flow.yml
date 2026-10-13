@@ -49,3 +49,11 @@ jobs:
           else
             echo "存档无变化"
           fi
+
+      # 提交成功后清 jsDelivr 分支缓存（@main 约 12h）—— 否则控制台的 jsDelivr 兜底源会长时间返回昨日旧档
+      - name: Purge jsDelivr cache
+        run: |
+          for f in flow-history.json; do
+            curl -sS --max-time 20 "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@${GITHUB_REF_NAME}/${f}" || true
+            echo "purged $f"
+          done
