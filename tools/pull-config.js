@@ -3,7 +3,7 @@
 const fs = require('fs')
 const TOKEN = process.env.GH_TOKEN || process.env.GITHUB_TOKEN
 const API = 'https://api.github.com'
-const REPO = '/repos/zyhaaad/stock-alert'
+const REPO = '/repos/zyh19870426/stock-alert'
 if (!TOKEN) { console.error('缺少 GH_TOKEN 环境变量'); process.exit(1) }
 async function get(p) {
   const res = await fetch(API + REPO + '/contents/' + p, {

@@ -32,7 +32,7 @@ const DIR = __dirname
 const HIST_PATH = path.join(DIR, 'fng-history.json')
 const CONFIG_PATH = path.join(DIR, 'config.json')
 
-const REPO = process.env.GITHUB_REPOSITORY || 'zyhaaad/stock-alert'
+const REPO = process.env.GITHUB_REPOSITORY || 'zyh19870426/stock-alert'
 const TOKEN = process.env.GITHUB_TOKEN || ''
 const API = 'https://api.github.com/repos/' + REPO
 const TENCENT = 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get'

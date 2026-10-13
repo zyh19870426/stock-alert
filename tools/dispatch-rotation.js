@@ -6,7 +6,7 @@
       这是**预期行为**，本脚本只用来验证 workflow 能启动、依赖能 require、脚本能跑到底。 */
 const TOKEN = process.env.GH_TOKEN
 if (!TOKEN) { console.error('缺少 GH_TOKEN'); process.exit(1) }
-const API = 'https://api.github.com/repos/zyhaaad/stock-alert'
+const API = 'https://api.github.com/repos/zyh19870426/stock-alert'
 const H = {
   'Authorization': 'Bearer ' + TOKEN,
   'Accept': 'application/vnd.github+json',

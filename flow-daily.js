@@ -7,7 +7,7 @@
  *       当日的 TOP，是当月累计的 TOP」），但云端日档只有逐日增量、算不出真月累计
  *       （电池技术 9 月真实 -806 亿，2 天日档却算出 +1.9 亿 → 板块从榜上消失）。
  * 页面（资金流向监控）直读这份存档作主数据源/兜底：
- *   https://raw.githubusercontent.com/zyhaaad/stock-alert/main/flow-history.json
+ *   https://raw.githubusercontent.com/zyh19870426/stock-alert/main/flow-history.json
  *
  * 用法：node flow-daily.js [--dry] [--nomon]
  *
@@ -361,8 +361,8 @@ async function buildBoardTopStocks(candDates, names) {
  * 写/不写由 --dry 决定。用途 = 在不碰 push2（本机被封）的前提下验证这段链路。 */
 async function stkCheck() {
   const urls = [
-    'https://raw.githubusercontent.com/zyhaaad/stock-alert/main/flow-history.json',
-    'https://cdn.jsdelivr.net/gh/zyhaaad/stock-alert@main/flow-history.json'
+    'https://raw.githubusercontent.com/zyh19870426/stock-alert/main/flow-history.json',
+    'https://cdn.jsdelivr.net/gh/zyh19870426/stock-alert@main/flow-history.json'
   ]
   let hist = null
   for (const u of urls) {

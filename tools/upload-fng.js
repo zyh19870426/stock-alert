@@ -9,7 +9,7 @@
  *   macOS / Linux：
  *     GH_TOKEN=ghp_xxx node tools/upload-fng.js
  *
- * 可选环境变量：GH_OWNER（默认 zyhaaad）、GH_REPO（默认 stock-alert）、GH_BRANCH（默认 main）
+ * 可选环境变量：GH_OWNER（默认 zyh19870426）、GH_REPO（默认 stock-alert）、GH_BRANCH（默认 main）
  *
  * 说明：
  *   - fng-core.js / fng.js / fng-history.json 走 Contents API
@@ -21,7 +21,7 @@ const fs = require('fs')
 const path = require('path')
 
 const TOKEN = process.env.GH_TOKEN || process.env.GITHUB_TOKEN
-const OWNER = process.env.GH_OWNER || 'zyhaaad'
+const OWNER = process.env.GH_OWNER || 'zyh19870426'
 const REPO = process.env.GH_REPO || 'stock-alert'
 const BRANCH = process.env.GH_BRANCH || 'main'
 const API = 'https://api.github.com/repos/' + OWNER + '/' + REPO

@@ -34,7 +34,7 @@ async function gh(method, url, body) {
 }
 
 async function main() {
-  const repoUrl = '/repos/zyhaaad/stock-alert'
+  const repoUrl = '/repos/zyh19870426/stock-alert'
 
   // 0. scope 确认
   const probe = await fetch(API + '/user', { headers: { Authorization: 'Bearer ' + TOKEN, 'User-Agent': 'setup' } })

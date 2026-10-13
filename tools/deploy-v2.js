@@ -9,7 +9,7 @@ const path = require('path')
 
 const TOKEN = process.env.GH_TOKEN || process.env.GITHUB_TOKEN
 const SRC = 'D:/mywork/stock-alert-cloud'
-const REPO = '/repos/zyhaaad/stock-alert'
+const REPO = '/repos/zyh19870426/stock-alert'
 const API = 'https://api.github.com'
 
 if (!TOKEN) {

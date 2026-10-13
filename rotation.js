@@ -3,7 +3,7 @@
  *
  * 作用：每交易日收盘后跑一次，把「全市场板块（一级行业 90 / 二级行业 136 / 概念 374）」
  *       的**轮动状态**算出来写进 rotation.json，供前端「板块轮动」页直读。
- *   页面：https://raw.githubusercontent.com/zyhaaad/stock-alert/main/rotation.json
+ *   页面：https://raw.githubusercontent.com/zyh19870426/stock-alert/main/rotation.json
  *
  * 用法：node rotation.js [--dry] [--limit N] [--conc 3] [--gap 120]
  *

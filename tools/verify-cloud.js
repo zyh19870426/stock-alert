@@ -10,7 +10,7 @@
  *   node tools/verify-cloud.js                # 匿名读（仓库是公开的，够用）
  *   GH_TOKEN=ghp_xxx node tools/verify-cloud.js   # 带 token 读（避免匿名限流）
  *
- * 可选环境变量：GH_OWNER / GH_REPO / GH_BRANCH（默认 zyhaaad / stock-alert / main）
+ * 可选环境变量：GH_OWNER / GH_REPO / GH_BRANCH（默认 zyh19870426 / stock-alert / main）
  */
 
 const fs = require('fs')
@@ -18,7 +18,7 @@ const path = require('path')
 const crypto = require('crypto')
 
 const TOKEN = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || ''
-const OWNER = process.env.GH_OWNER || 'zyhaaad'
+const OWNER = process.env.GH_OWNER || 'zyh19870426'
 const REPO = process.env.GH_REPO || 'stock-alert'
 const BRANCH = process.env.GH_BRANCH || 'main'
 const API = 'https://api.github.com/repos/' + OWNER + '/' + REPO
