@@ -10,9 +10,11 @@
  *        但 f207 值全为占位符 "-"，被 Number() 判成 NaN 全丢 ⇒「未取到任何个股融资余额」。
  *        改用本报表；实测当日全市场 4455 只 / 25066 亿元。
  *   · 板块成员：datacenter-web RPT_BOARD_CONSTITUENT（复用 flow-daily.fetchBoardMembers）
- *   · 板块名：push2delay clist（复用 flow-daily.fetchBoards，type=2 行业 / 3 概念）
+ *   · 板块名：push2delay clist（复用 flow-daily.fetchBoards(type,pz,allPages)，type=2 行业 / 3 概念）
+ *     ⚠️ 2026-10-13：原只取 pn=1 两侧（pz 硬上限 100）⇒ 名字仅覆盖约 1/3，榜单混入大批无名板块
+ *        （BKxxxx）。改为 allPages 翻页取满（东财实际 行业≈496 / 概念≈506）。
  *   · 数据日：RPTA_WEB_RZRQ_GGMX 自身的 DATE（T+1）；取不到时兜底 RPTA_RZRQ_LSHJ 的 DIM_DATE
- * 产出 margin-sector-history.json：{date, total, sectors:[{bk,name,kind,rzye,sharePct,members,top}], others}
+ * 产出 margin-sector-history.json：{date, total, sectors:[{bk,name(口语名),full(原名),kind,rzye,sharePct,members,top}]}
  * 口径：板块两融 = 成分股**融资余额**之和（融券占比极小，先只算融资余额并注明）；T+1。
  * 失败策略：取数失败 → 沿用上一日存档（fail-open，不生成脏数据）。
  */
@@ -103,37 +105,135 @@ const TAG_BOARD_PREFIXES = [
   /* 指数 / 通道 / 标的类 */
   '融资融券', '沪股通', '深股通', 'MSCI', '富时罗素', '标准普尔', '标普',
   'HS300', '沪深300', '上证50', '上证180', '上证380', '中证500', '中证1000',
-  '深成500', '深证100', '创业成份', '央视50', '茅指数', '宁组合', 'AH股',
+  '深成500', '深证100', '创业成份', '创业板', '央视50', '茅指数', '宁组合', 'AH股',
   /* 持仓 / 榜单类 */
   'QFII重仓', '基金重仓', '机构重仓', '社保重仓', '券商重仓', '券商金股',
-  '养老金', '东方财富热股', '独角兽',
+  '养老金', '东方财富热股', '独角兽', '证金持股',
   /* 市值 / 风格类 */
   '小盘股', '小盘成长', '小盘价值', '中盘股', '中盘成长', '中盘价值',
   '大盘股', '大盘成长', '大盘价值', '权重股', '高市净率',
   '科技风格', '周期股', '金融地产风格', '先进制造风格', '医药医疗风格',
-  /* 财务 / 行情特征类 */
+  /* 财务 / 行情 / 资质特征类 */
   '破净股', '长期破净', '破增发价股', '微利股', '高成长股',
-  '2026中报预减', '2026一季报预增', '2026三季报预增',
-  '昨日涨停', '昨日高振幅', '最近多板', '题材股', '行业龙头', '股权集中'
+  '昨日', '最近多板', '题材股', '行业龙头', '股权集中',
+  '百元股', '低价股', '高价股', '绩优股', '次新股', '专精特新'
 ]
+/* ★ 2026-10-13 第二类：关键词**包含**匹配 —— 前缀匹配覆盖不到的写法。
+ * 依据 = 全量 443 个概念板块逐条扫描（业绩/价格/标的/股权/估值/持仓/打板/指数/资质/参股 共 33 项命中）。 */
+const TAG_BOARD_WORDS = [
+  '破净', '破发', '预增', '预减', '预盈', '预亏', '扭亏', '首亏', '续盈',
+  '股权激励', '股权分散', '股权转让', '参股', '举牌', '转债标的', '高送转', '送转',
+  '市净率', '市盈率', '贬值受益', '壳资源', '退市',
+  '含B股', '含H股', 'AB股', '员工持股', '龙虎榜'
+]
+/* ★ 含年份的业绩快报（2026中报预增 / 2025三季报扭亏 …）*/
+const TAG_BOARD_RE = /^\d{4}(中报|一季报|三季报|半年报|年报)/
 function isTagBoard(name) {
   if (!name) return false
+  const n = String(name)
   for (let i = 0; i < TAG_BOARD_PREFIXES.length; i++) {
-    if (name.indexOf(TAG_BOARD_PREFIXES[i]) === 0) return true
+    if (n.indexOf(TAG_BOARD_PREFIXES[i]) === 0) return true
   }
-  return false
+  for (let i = 0; i < TAG_BOARD_WORDS.length; i++) {
+    if (n.indexOf(TAG_BOARD_WORDS[i]) >= 0) return true
+  }
+  return TAG_BOARD_RE.test(n)
+}
+
+/* ★ 2026-10-13 第三刀：名称口语化 —— 东财行业/概念名偏书面（「印制电路板」「通信网络设备及器件」
+ * 「光通信模块」），股民口语是「PCB」「通信设备」「光模块」。用**显式别名表**做展示名替换：
+ * 可审计、无自由参数、未命中即用原名。原名存 full 字段供悬停溯源（前端 tooltip）。
+ * 通用规则：末尾罗马数字（Ⅰ/Ⅱ/Ⅲ）一律剥离；题材名「XX概念」的冗余后缀剥离。
+ * 同 tab 内若替换后重名 → 双方回退原名，避免两个不同板块显示成一模一样。 */
+const BOARD_ALIAS = {
+  /* 行业（东财各级行业名 → 股民口语） */
+  '证券': '券商',
+  '股份制银行': '股份行',
+  '国有大型银行': '国有大行',
+  '数字芯片设计': '芯片设计',
+  '集成电路制造': '芯片制造',
+  '集成电路封测': '芯片封测',
+  '印制电路板': 'PCB',
+  '通信网络设备及器件': '通信网络设备',
+  '消费电子零部件及组装': '消费电子零部件',
+  '垂直应用软件': '应用软件',
+  '横向通用软件': '通用软件',
+  '工程咨询服务': '工程咨询',
+  '调味发酵品': '调味品',
+  '其他电源设备': '电源设备',
+  '元件': '电子元件',
+  '家用电器': '家电',
+  /* 题材（口语化） */
+  '光通信模块': '光模块',
+  '车联网(车路云)': '车联网',
+  '混合现实': 'MR',
+  '虚拟数字人': '数字人'
+}
+function normBoardName(n) { return String(n == null ? '' : n).replace(/[ⅠⅡⅢⅣⅤ]+$/, '').trim() }
+function aliasOf(name) {
+  const base = normBoardName(name)
+  if (BOARD_ALIAS[base]) return BOARD_ALIAS[base]
+  if (/概念$/.test(base) && base.length > 2) return base.slice(0, -2)   /* 「CPO概念」→「CPO」 */
+  return base
+}
+function applyAlias(rows) {
+  const cnt = {}
+  for (const r of rows) {
+    r.full = r.name
+    r.name = aliasOf(r.name)
+    const k = String(r.kind) + '|' + r.name
+    cnt[k] = (cnt[k] || 0) + 1
+  }
+  for (const r of rows) {
+    if (cnt[String(r.kind) + '|' + r.name] > 1) r.name = r.full   /* 同 tab 重名 → 回退原名，保持区分 */
+  }
+  return rows
+}
+
+/* ★ 2026-10-13 第二刀：东财行业板块会同时挂二级(Ⅱ)与三级(Ⅲ)两份 —— 名称只差一个罗马数字后缀，
+ * 成分股与融资余额完全相同 ⇒ 榜单出现「证券Ⅱ / 证券Ⅲ」这类同值双行（实测前 50 名里占约 12 席，
+ * 纯噪声，把真行业挤下去）。规则（可审计、无自由参数）：归一键 = 名称去掉末尾罗马数字；
+ * 同键 + 同 kind + 同成分数 + 同融资余额（= 同一批股票）→ 只留一条，优先名称更短者
+ * （如「银行」优于「银行Ⅱ」）。成分 < MIN_BOARD_MEMBERS 的零星小板块一并剔除。 */
+const MIN_BOARD_MEMBERS = 5
+function boardKeyOf(r) {
+  return String(r.kind) + '|' + String(r.name || '').replace(/[ⅠⅡⅢⅣⅤ]+$/, '').trim()
+}
+function dedupeHierarchy(rows) {
+  const kept = {}, out = [], dup = []
+  for (const r of rows) {
+    const k = boardKeyOf(r)
+    const p = kept[k]
+    if (p && p.members === r.members && Math.abs(Number(p.rzye) - Number(r.rzye)) < 1) {
+      if (String(r.name).length < String(p.name).length) {
+        dup.push(String(p.name))
+        const i = out.indexOf(p)
+        if (i >= 0) out[i] = r
+        kept[k] = r
+      } else {
+        dup.push(String(r.name))
+      }
+      continue
+    }
+    kept[k] = r
+    out.push(r)
+  }
+  return { out: out, dup: dup }
 }
 
 /* ★ 纯函数（无网络，可单测）：板块成员 × 个股融资余额 → 各板块占比，降序。
- * 不在此折叠「其他」：云端存全量，前端按 行业/题材 各自取 TOP + 折叠，口径更清晰。
- * 非题材标签板（isTagBoard）在此剔除 ⇒ 存档即干净，前端零改。 */
+ * 不在此折叠「其他」：云端存全量，前端按 行业/题材 各取 TOP50。
+ * 三道剔除都在此完成（存档即干净、前端零改）：非题材标签板 isTagBoard → 层级重复 dedupeHierarchy
+ * → 零星小板块（成分 < MIN_BOARD_MEMBERS）。 */
 function buildSectorShares(members, stockMap, names, total) {
   const rows = []
   const dropped = []
+  let unnamed = 0
   stockMap = stockMap || {}   /* --nomargin / 取数失败分支：无个股两融时按空集处理，不崩 */
   for (const bk of Object.keys(members)) {
     const nm = names[bk]
-    const nmv = nm ? String(nm[0] || bk) : bk
+    if (!nm) { unnamed++; continue }   /* 不在行业/概念分类里的板块（无名称、无 kind）→ 不产出，避免 BKxxxx 噪声混入 */
+    const nmv = String(nm[0] || bk)
     if (isTagBoard(nmv)) { dropped.push(nmv); continue }
     const cs = members[bk] || []
     let sum = 0, n = 0
@@ -149,7 +249,7 @@ function buildSectorShares(members, stockMap, names, total) {
     rows.push({
       bk: bk,
       name: nmv,
-      kind: nm ? Number(nm[1]) || 0 : 0,
+      kind: Number(nm[1]) || 0,
       rzye: sum,
       sharePct: total > 0 ? sum / total : 0,
       members: n,
@@ -157,14 +257,18 @@ function buildSectorShares(members, stockMap, names, total) {
     })
   }
   rows.sort((a, b) => b.rzye - a.rzye)
-  return { sectors: rows, dropped: dropped }
+  const ded = dedupeHierarchy(rows)
+  const kept = ded.out.filter(r => r.members >= MIN_BOARD_MEMBERS)
+  const thin = ded.out.filter(r => r.members < MIN_BOARD_MEMBERS).map(r => r.name)
+  const sectors = applyAlias(kept)   /* 展示名口语化（原名存 full 供悬停溯源） */
+  return { sectors: sectors, dropped: dropped, dupDropped: ded.dup, thinDropped: thin, unnamed: unnamed }
 }
 
 async function main() {
   /* 1. 板块名（行业+概念）+ 成员（datacenter-web），任一失败降级不阻断 */
   let ind = {}, con = {}
-  try { ind = await fetchBoards(2, 100) } catch (e) { console.log('⚠️ 行业板块名失败：' + e.message) }
-  try { con = await fetchBoards(3, 80) } catch (e) { console.log('⚠️ 概念板块名失败：' + e.message) }
+  try { ind = await fetchBoards(2, 100, true) } catch (e) { console.log('⚠️ 行业板块名失败：' + e.message) }
+  try { con = await fetchBoards(3, 100, true) } catch (e) { console.log('⚠️ 概念板块名失败：' + e.message) }
   const names = {}
   for (const bk in ind) names[bk] = [ind[bk][0], 2]
   for (const bk in con) if (!names[bk]) names[bk] = [con[bk][0], 3]
@@ -196,8 +300,11 @@ async function main() {
   const date = dataDate || await getMarginDate()
 
   /* 4. 聚合 */
-  const { sectors, dropped } = buildSectorShares(members, stock, names, total)
+  const { sectors, dropped, dupDropped, thinDropped, unnamed } = buildSectorShares(members, stock, names, total)
   if (dropped.length) console.log('已排除非题材标签板 ' + dropped.length + ' 个：' + dropped.join(' / '))
+  if (unnamed) console.log('已跳过无名板块（不在行业/概念分类）' + unnamed + ' 个')
+  if (dupDropped.length) console.log('已合并层级重复板块 ' + dupDropped.length + ' 个：' + dupDropped.join(' / '))
+  if (thinDropped.length) console.log('已排除零星小板块（成分<' + MIN_BOARD_MEMBERS + '）' + thinDropped.length + ' 个：' + thinDropped.join(' / '))
   const out = {
     date: date,
     total: total,
@@ -207,7 +314,7 @@ async function main() {
   }
   const body = JSON.stringify(out)
   const top3 = sectors.slice(0, 3).map(s => s.name).join(' / ')
-  const summary = date + '  板块 ' + (sectors.length + 1) + ' 项（含其他）  全市场融资余额 ' +
+  const summary = date + '  板块 ' + sectors.length + ' 项  全市场融资余额 ' +
     (total / 1e8).toFixed(0) + ' 亿元  TOP3: ' + top3 + '  ' + Math.round(body.length / 1024) + 'KB'
   if (DRY) { console.log('[dry] ' + summary); return }
   fs.writeFileSync(HIST_PATH, body)
@@ -220,5 +327,10 @@ if (require.main === module) {
     process.exit(1)
   })
 } else {
-  module.exports = { buildSectorShares: buildSectorShares, fetchAllStockMargin: fetchAllStockMargin, isTagBoard: isTagBoard, TAG_BOARD_PREFIXES: TAG_BOARD_PREFIXES }
+  module.exports = {
+    buildSectorShares: buildSectorShares, fetchAllStockMargin: fetchAllStockMargin,
+    isTagBoard: isTagBoard, TAG_BOARD_PREFIXES: TAG_BOARD_PREFIXES, TAG_BOARD_WORDS: TAG_BOARD_WORDS,
+    dedupeHierarchy: dedupeHierarchy, MIN_BOARD_MEMBERS: MIN_BOARD_MEMBERS,
+    aliasOf: aliasOf, BOARD_ALIAS: BOARD_ALIAS
+  }
 }

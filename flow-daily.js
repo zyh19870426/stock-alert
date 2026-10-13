@@ -400,21 +400,35 @@ async function stkCheck() {
  *   · 两侧（流入 po=1 / 流出 po=0）**独立容错**：只做成一侧也接受，
  *     否则一个 502 就让当日**整档**丢失（这正是 10-08/10-09 存档停在 09-30 的原因）；
  *   · 两侧都失败才抛错（真故障，需要暴露出来）。 */
-async function fetchBoards(type, pz) {
-  const mk = function (po) {
-    return 'https://push2delay.eastmoney.com/api/qt/clist/get?pn=1&pz=' + pz +
+async function fetchBoards(type, pz, allPages) {
+  const mk = function (po, pn) {
+    return 'https://push2delay.eastmoney.com/api/qt/clist/get?pn=' + (pn || 1) + '&pz=' + pz +
       '&po=' + po + '&np=1&fltt=2&invt=2&fid=f62&fs=m:90+t:' + type +
       '&fields=f12,f14,f2,f3,f62&ut=b2884a393a59ad64002292a3e90d46a5'
   }
   const d1 = [], d0 = []
   let e1 = null, e0 = null
   try {
-    const j1 = await getJSON(mk(1), 3)
+    const j1 = await getJSON(mk(1, 1), 3)
     ;((j1 && j1.data && j1.data.diff) || []).forEach(x => d1.push(x))
+    /* ★ 2026-10-13：新增 allPages —— 接口 pz 硬上限 100，默认只取 pn=1 两侧 ⇒ 板块名只覆盖约 1/3
+     * （东财实际 行业≈496 / 概念≈506），会让「板块两融占比」榜出现大批无名板块（BKxxxx）。
+     * allPages=true 时按 total 翻页取满（≤20 页），仅 margin-sector 使用；flow-daily 默认 false 不受影响。 */
+    if (allPages && j1 && j1.data && Number(j1.data.total) > pz) {
+      const pages = Math.min(20, Math.ceil(Number(j1.data.total) / pz))
+      for (let pn = 2; pn <= pages; pn++) {
+        if (outOfBudget()) { console.log('⚠️ 预算到点，t=' + type + ' 板块名翻页停在第 ' + (pn - 1) + ' 页'); break }
+        try {
+          const jp = await getJSON(mk(1, pn), 3)
+          ;((jp && jp.data && jp.data.diff) || []).forEach(x => d1.push(x))
+        } catch (e) { console.log('⚠️ t=' + type + ' 第 ' + pn + ' 页失败：' + e.message + '（停止翻页）'); break }
+        await wait(200)
+      }
+    }
   } catch (e) { e1 = e }
-  if (!outOfBudget()) {
+  if (!allPages && !outOfBudget()) {
     try {
-      const j0 = await getJSON(mk(0), 3)
+      const j0 = await getJSON(mk(0, 1), 3)
       ;((j0 && j0.data && j0.data.diff) || []).forEach(x => d0.push(x))
     } catch (e) { e0 = e }
   }
