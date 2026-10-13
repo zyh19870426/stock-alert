@@ -1,0 +1,33 @@
+name: write-probe
+
+# 一次性写回探针：验证新仓 Actions 是否具备 git push 能力。
+# 背景：新仓 default_workflow_permissions = read，workflow 内显式声明 contents: write 能否提权，
+#       在本仓从未被实测过（既有运行要么盘前 return，要么数据无变化）。
+# 做法：由本文件自身被 push 触发 → 追加一行日志 → git push 回仓（用 GITHUB_TOKEN）。
+# 判定：出现 "probe: verify actions write-back" 提交 = 写回能力成立；403 = 需去仓库设置提权。
+# 跑完即删（本文件 + .write-probe.log）。
+
+on:
+  push:
+    paths:
+      - '.github/workflows/write-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Append probe line and push back
+        run: |
+          set -e
+          echo "$(date -u +%FT%TZ) write-probe OK run=${{ github.run_id }}" >> .write-probe.log
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .write-probe.log
+          git commit -m "probe: verify actions write-back [skip ci]"
+          git push
