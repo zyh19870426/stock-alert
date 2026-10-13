@@ -94,12 +94,47 @@ async function getMarginDate() {
   return bjToday()
 }
 
+/* ★ 2026-10-13：东财概念池里混有「非题材」的标签板（指数成分 / 通道 / 持仓 / 风格 / 行情特征），
+ * 其成分覆盖全市场或大比例 ⇒ 占比无分析意义且会霸榜（实测 TOP5 全是这类：融资融券 95.7% 等）。
+ * 处置 = 用「显式前缀名单」排除：可审计、无自由参数、可回归。
+ * 依据 = 2026-10-13 存档全量 160 个概念板块逐条核对（非拍脑袋）；main() 会打印本轮实际排除项。
+ * 若东财新增同类标签板，在此补一行即可。 */
+const TAG_BOARD_PREFIXES = [
+  /* 指数 / 通道 / 标的类 */
+  '融资融券', '沪股通', '深股通', 'MSCI', '富时罗素', '标准普尔', '标普',
+  'HS300', '沪深300', '上证50', '上证180', '上证380', '中证500', '中证1000',
+  '深成500', '深证100', '创业成份', '央视50', '茅指数', '宁组合', 'AH股',
+  /* 持仓 / 榜单类 */
+  'QFII重仓', '基金重仓', '机构重仓', '社保重仓', '券商重仓', '券商金股',
+  '养老金', '东方财富热股', '独角兽',
+  /* 市值 / 风格类 */
+  '小盘股', '小盘成长', '小盘价值', '中盘股', '中盘成长', '中盘价值',
+  '大盘股', '大盘成长', '大盘价值', '权重股', '高市净率',
+  '科技风格', '周期股', '金融地产风格', '先进制造风格', '医药医疗风格',
+  /* 财务 / 行情特征类 */
+  '破净股', '长期破净', '破增发价股', '微利股', '高成长股',
+  '2026中报预减', '2026一季报预增', '2026三季报预增',
+  '昨日涨停', '昨日高振幅', '最近多板', '题材股', '行业龙头', '股权集中'
+]
+function isTagBoard(name) {
+  if (!name) return false
+  for (let i = 0; i < TAG_BOARD_PREFIXES.length; i++) {
+    if (name.indexOf(TAG_BOARD_PREFIXES[i]) === 0) return true
+  }
+  return false
+}
+
 /* ★ 纯函数（无网络，可单测）：板块成员 × 个股融资余额 → 各板块占比，降序。
- * 不在此折叠「其他」：云端存全量，前端按 行业/题材 各自取 TOP + 折叠，口径更清晰。 */
+ * 不在此折叠「其他」：云端存全量，前端按 行业/题材 各自取 TOP + 折叠，口径更清晰。
+ * 非题材标签板（isTagBoard）在此剔除 ⇒ 存档即干净，前端零改。 */
 function buildSectorShares(members, stockMap, names, total) {
   const rows = []
+  const dropped = []
   stockMap = stockMap || {}   /* --nomargin / 取数失败分支：无个股两融时按空集处理，不崩 */
   for (const bk of Object.keys(members)) {
+    const nm = names[bk]
+    const nmv = nm ? String(nm[0] || bk) : bk
+    if (isTagBoard(nmv)) { dropped.push(nmv); continue }
     const cs = members[bk] || []
     let sum = 0, n = 0
     const local = []
@@ -111,10 +146,9 @@ function buildSectorShares(members, stockMap, names, total) {
     }
     if (n === 0) continue
     local.sort((a, b) => b.rzye - a.rzye)
-    const nm = names[bk]
     rows.push({
       bk: bk,
-      name: nm ? String(nm[0] || bk) : bk,
+      name: nmv,
       kind: nm ? Number(nm[1]) || 0 : 0,
       rzye: sum,
       sharePct: total > 0 ? sum / total : 0,
@@ -123,7 +157,7 @@ function buildSectorShares(members, stockMap, names, total) {
     })
   }
   rows.sort((a, b) => b.rzye - a.rzye)
-  return { sectors: rows }
+  return { sectors: rows, dropped: dropped }
 }
 
 async function main() {
@@ -162,7 +196,8 @@ async function main() {
   const date = dataDate || await getMarginDate()
 
   /* 4. 聚合 */
-  const { sectors } = buildSectorShares(members, stock, names, total)
+  const { sectors, dropped } = buildSectorShares(members, stock, names, total)
+  if (dropped.length) console.log('已排除非题材标签板 ' + dropped.length + ' 个：' + dropped.join(' / '))
   const out = {
     date: date,
     total: total,
@@ -185,5 +220,5 @@ if (require.main === module) {
     process.exit(1)
   })
 } else {
-  module.exports = { buildSectorShares: buildSectorShares, fetchAllStockMargin: fetchAllStockMargin }
+  module.exports = { buildSectorShares: buildSectorShares, fetchAllStockMargin: fetchAllStockMargin, isTagBoard: isTagBoard, TAG_BOARD_PREFIXES: TAG_BOARD_PREFIXES }
 }
