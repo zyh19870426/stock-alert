@@ -1,13 +1,24 @@
-name: margin-sector-daily
+name: margin-daily
 
-# 板块/题材消耗两融占比 日更存档：每交易日收盘后抓全市场个股融资余额（datacenter-web RPTA_WEB_RZRQ_GGMX，T+1）
-# → 按板块成员聚合 → 占全市场比降序 → 写 margin-sector-history.json，供控制台「两融·杠杆水位」
-# 详情页的「板块/题材消耗两融占比」面板直读（前端零请求）。
+# 两融日更存档（两个 job 各自独立，互不阻塞）：
+#   · sector  板块/题材消耗两融占比 → margin-sector-history.json
+#   · regime  大盘阶段雷达（两融视角）→ margin-regime.json
+#
+# sector：每交易日收盘后抓全市场个股融资余额（datacenter-web RPTA_WEB_RZRQ_GGMX，T+1）
+#         → 按板块成员聚合 → 占全市场比降序 → 写 margin-sector-history.json，供控制台
+#         「两融·杠杆水位」详情页的「板块/题材消耗两融占比」面板直读（前端零请求）。
+# regime：抓两融全历史（datacenter-web RPTA_RZRQ_LSHJ，2013-01 起 3300+ 日）+ 两市成交额
+#         → 三项状态量（水位 L / 周转率 T / 参与度 P）+ 余额 60 日趋势 → 250 日滚动分位
+#         → 事件段统计 + 置换检验 2000 次 + Bonferroni 校正 → 写 margin-regime.json，
+#         供控制台「大盘阶段雷达（两融视角）」块直读（前端只呈现、不重算）。
+#
 # cron 用 UTC：北京 16:20 = UTC 8:20（在 flow-daily 16:10 之后错开 10 分钟，避免同时抢预算）。
-# ⚠️ 取的是**最新已披露日**（T+1，通常为上一交易日）；非交易日 cron 照常触发时仍返回同一份最新快照，
-#    属正常，照常写盘即可（本脚本不依赖 trade-day.js）。
+# ⚠️ 两者取的都是**最新已披露日**（T+1，通常为上一交易日）；非交易日 cron 照常触发时仍返回
+#    同一份最新快照，属正常，照常写盘即可（两个脚本都不依赖 trade-day.js）。
 # ⚠️ 2026-10-13 换源：原 push2 clist fid=f207 字段已失效（四域名全 200 但值全为占位符 "-"），
 #    改用 datacenter-web 融资融券个股明细；实测当日 4455 只 / 25066 亿元。
+# ⚠️ 2026-10-15 新增 regime job：此前 margin-regime.js **无任何 workflow 覆盖**，
+#    margin-regime.json 靠手动跑 ⇒ 页面会停在旧日期。
 on:
   schedule:
     - cron: '20 8 * * 1-5'
@@ -17,11 +28,11 @@ permissions:
   contents: write
 
 concurrency:
-  group: margin-sector-daily
+  group: margin-daily
   cancel-in-progress: false
 
 jobs:
-  margin:
+  sector:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -54,3 +65,42 @@ jobs:
             curl -sS --max-time 20 "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@${GITHUB_REF_NAME}/${f}" || true
             echo "purged $f"
           done
+
+  regime:
+    # 串行在 sector 之后：两个 job 都要 git push，并行会互相撞引用（虽有 rebase 兜底，
+    # 但靠重试取胜不如直接排队；regime 本就要跑十几分钟，多等一会儿无感）。
+    needs: sector
+    runs-on: ubuntu-latest
+    # 4015 页两融全历史（分页串行）+ 2 个指数各 6000 根 + 12 层 × 4 期限 × 置换 2000 次，
+    # 是本仓最重的一个脚本；给足预算，别让它被 timeout 砍在半途（脚本失败即退出码 1，不写半成品）。
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build margin regime archive
+        run: node margin-regime.js
+
+      - name: Commit archive
+        run: |
+          git add margin-regime.json
+          if ! git diff --cached --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: update margin regime archive [skip ci]"
+            git pull --rebase --autostash origin ${GITHUB_REF_NAME} || true
+            git push || (sleep 5 && git pull --rebase --autostash origin ${GITHUB_REF_NAME} && git push)
+          else
+            echo "存档无变化"
+          fi
+
+      - name: Purge jsDelivr cache
+        run: |
+          for f in margin-regime.json; do
+            curl -sS --max-time 20 "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@${GITHUB_REF_NAME}/${f}" || true
+            echo "purged $f"
+          done
+
