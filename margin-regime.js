@@ -51,7 +51,25 @@ const SPEC = {
    *   其余（探索性）= 12 层 × 4 期限 = 48 次检验 → 0.05/48
    * 阈值写死在这里，不允许按结果回改。 */
   bonfPrimary: 0.05 / 8,
-  bonfExplore: 0.05 / 48
+  bonfExplore: 0.05 / 48,
+  /* ===== 决策打分（2026-10-18 新增，★预注册，不允许按结果回改）=====
+   * 结构：总分 = 位置分(0/1/2) + 出清分(0/1)，范围 0~3。
+   * 依据：沪深300 日频 2010-03~2026-10（4016 日），事件段(间隔>20 交易日)为统计单元。
+   *   0 分 −2.39%(n14,t−1.83,胜29%) · 1 分 −0.22%(n16) · 2 分 +2.67%(n20,t+3.30,胜70%) · 3 分 +4.15%(n11,t+2.27,胜82%)
+   *   2 分档置换检验 p=0.0040(2000 次)；位置阈值 −15%~−25% 全程为正且 t≥3.0；出清区间 5 个变体全在 +2.1~+2.7%。
+   * ★ 为什么位置分要 0/1/2 而不是布尔：距 250 日高越深期望越高（−15%→+2.16% / −20%→+2.67% / −25%→+3.98%），单调。
+   * ★ 为什么出清要卡「2%~4%」区间而不是「降得越多越好」：>4% 为踩踏，20 日 −0.13%（已验证）。
+   * ★ 缩量（成交额/20 日均额<0.7）未纳入：22 个行业指数口径 t=7.9 很强，但沪深300 单指数口径无法复现，
+   *   且两市成交额与沪深300 成交量量比相关性仅 −0.07（口径不同）⇒ 如实降级为「参考项」，不计分。 */
+  score: {
+    deep: -0.20,      // 位置 2 分：距 250 日最高收盘 ≤ −20%
+    mid: -0.08,       // 位置 1 分：−20% < 距高 ≤ −8%；0 分：> −8%
+    dd60: -0.08,      // 出清前置：距 60 日高 ≤ −8%（低位）
+    db5Hi: -0.02,     // 5 日融资余额变化上界（降 2%）
+    db5Lo: -0.04,     // 下界（降 4%，超过算踩踏不计分）
+    gap: 20,          // 事件段聚合间隔（交易日）
+    hist: [20, 60]    // 输出这两个期限的历史条件分布
+  }
 }
 /* 预注册的「主要假设」：情绪/杠杆两端对比（冰点 vs 沸腾） */
 const PRIMARY_PAIRS = [
@@ -252,6 +270,82 @@ function matchProfile(cur, bottom, top) {
   return { nearBottom, nearTop, total: items.length, detail, closerTo: nearBottom >= nearTop ? '底部' : '顶部' }
 }
 
+/* ============================ 决策打分（2026-10-18） ============================
+ * 纯函数：入参 rows（buildSeries 产物，含 hs/rzye），返回结构化打分结果。
+ * ★ 与上面 L/T/P/B60 体系相互独立：那套回答「处于什么阶段」，这套回答「三条条件命中几条、历史同分档之后怎么走」。
+ * ★ 不含任何前瞻信息：dd250/dd60/db5 只用当日及以前，f20/f60 只用于回算历史分布。
+ */
+function computeScore(rows) {
+  const S = SPEC.score, n = rows.length
+  const H = {}
+  H[20] = 'f20'; H[60] = 'f60'
+  for (let i = 0; i < n; i++) {
+    const r = rows[i]
+    let h250 = -Infinity, h60 = -Infinity
+    for (let j = Math.max(0, i - 249); j <= i; j++) if (rows[j].hs > h250) h250 = rows[j].hs
+    for (let j = Math.max(0, i - 59); j <= i; j++) if (rows[j].hs > h60) h60 = rows[j].hs
+    r.dd250 = i >= 249 ? r.hs / h250 - 1 : null
+    r.h250 = i >= 249 ? h250 : null
+    r.dd60 = i >= 59 ? r.hs / h60 - 1 : null
+    r.db5 = (i >= 5 && rows[i - 5].rzye) ? r.rzye / rows[i - 5].rzye - 1 : null
+    r.f20 = i + 20 < n ? rows[i + 20].hs / r.hs - 1 : null
+    r.f60 = i + 60 < n ? rows[i + 60].hs / r.hs - 1 : null
+    r.pos = r.dd250 == null ? null : (r.dd250 <= S.deep ? 2 : r.dd250 <= S.mid ? 1 : 0)
+    r.clr = (r.dd60 == null || r.db5 == null) ? null
+      : ((r.dd60 <= S.dd60 && r.db5 <= S.db5Hi && r.db5 >= S.db5Lo) ? 1 : 0)
+    r.score = (r.pos == null || r.clr == null) ? null : r.pos + r.clr
+  }
+  /* 段级统计：连段命中日聚合，每段 1 个观测（否则重叠前瞻会把显著性抬高数倍） */
+  function statOf(pred, hz) {
+    const key = H[hz], hit = []
+    for (let i = 0; i < n; i++) if (rows[i][key] != null && pred(rows[i])) hit.push(i)
+    const eps = []
+    for (const i of hit) {
+      const L = eps[eps.length - 1]
+      if (L && i - L.end <= S.gap) { L.end = i; L.idx.push(i) } else eps.push({ start: i, end: i, idx: [i] })
+    }
+    const v = eps.map(e => mean(e.idx.map(i => rows[i][key])))
+    if (!v.length) return { n: 0, med: null, mean: null, t: null, win: null }
+    const m = mean(v)
+    const sd = v.length > 1 ? Math.sqrt(v.reduce((s, x) => s + (x - m) * (x - m), 0) / (v.length - 1)) : null
+    return {
+      n: v.length, med: median(v), mean: m,
+      t: (sd != null && v.length > 2) ? m / (sd / Math.sqrt(v.length)) : null,
+      win: v.filter(x => x > 0).length / v.length
+    }
+  }
+  const tiers = {}
+  for (let s = 0; s <= 3; s++) {
+    tiers[s] = {}
+    for (const hz of S.hist) tiers[s]['h' + hz] = statOf(r => r.score === s, hz)
+  }
+  /* 单条规则的独立效应（页面用来交代「哪条在起作用」） */
+  const singles = {
+    pos2: statOf(r => r.pos === 2, 20),
+    pos1: statOf(r => r.pos === 1, 20),
+    pos0: statOf(r => r.pos === 0, 20),
+    clr1: statOf(r => r.clr === 1, 20),
+    clr0: statOf(r => r.clr === 0, 20)
+  }
+  const L = rows[n - 1]
+  return {
+    spec: S,
+    latest: {
+      d: L.d, hs: L.hs, dd250: L.dd250, dd60: L.dd60, db5: L.db5,
+      pos: L.pos, clr: L.clr, score: L.score, h250: L.h250,
+      /* 下一档触发价位：位置 2 分线（距 250 日高 −20%） */
+      tgtDeep: L.h250 == null ? null : L.h250 * (1 + S.deep),
+      /* 出清失效线：单周再降超 4% 即踩踏（历史 20 日 −0.13%） */
+      db5Break: S.db5Lo
+    },
+    tiers: tiers,
+    singles: singles,
+    sample: { n: n, from: rows[0].d, to: L.d },
+    note: '总分 = 位置分(0/1/2) + 出清分(0/1)。统计单元为事件段（间隔 >20 交易日为新段，每段 1 个观测），' +
+      '前瞻收益从信号日收盘起算；分档历史值为段级均值，t 值为段级 t。只描述历史同分档的条件分布，不代表未来必然重复。'
+  }
+}
+
 /* ============================ 主流程 ============================ */
 async function main() {
   console.log('抓取两融全历史 + 两市成交额 …')
@@ -359,6 +453,16 @@ async function main() {
   const series = rows.slice(-260).map(r => [r.d, r.L == null ? null : +(r.L * 100).toFixed(3), r.T == null ? null : +(r.T * 100).toFixed(3), r.P == null ? null : +(r.P * 100).toFixed(3),
     r.L_q == null ? null : Math.round(r.L_q * 100), r.T_q == null ? null : Math.round(r.T_q * 100), r.P_q == null ? null : Math.round(r.P_q * 100), r.B60 == null ? null : +r.B60.toFixed(1)])
 
+  /* ---- 决策打分（位置 + 出清）---- */
+  const scoreCard = computeScore(rows)
+  if (scoreCard.latest.score != null) {
+    const t = scoreCard.tiers[scoreCard.latest.score].h20
+    console.log('  打分 ' + scoreCard.latest.score + '/3（位置' + scoreCard.latest.pos + '+出清' + scoreCard.latest.clr + '）' +
+      ' → 历史 20 日 ' + fmtPct(t && t.mean) + '（' + (t ? t.n : 0) + ' 段）')
+  } else {
+    console.log('  打分：数据不足（缺少 250 日历史或融资余额）')
+  }
+
   const out = {
     date: last.d,
     generatedAt: new Date().toISOString(),
@@ -377,13 +481,15 @@ async function main() {
         '；预注册主要假设（情绪两端对比，20/60 日）' + (primarySig ? '有显著项' : '无显著项')
     },
     series: series,
+    score: scoreCard,
     note: '两融状态为「当日盘后披露」→ 前瞻收益从次一交易日收盘起算；统计单元为事件段（非交易日），' +
       '显著性用置换检验；本页只给历史条件分布与可信度，不构成买卖建议。'
   }
   const body = JSON.stringify(out)
   const onLayers = layers.filter(l => l.on).map(l => l.id).join(',') || '无'
   const summary = last.d + '  L分位' + fmtPct(last.L_q) + ' T分位' + fmtPct(last.T_q) + ' P分位' + fmtPct(last.P_q) + ' 余额60日' + (last.B60 == null ? '—' : last.B60.toFixed(1) + '%') +
-    ' | 命中层: ' + onLayers + ' | ' + layers.length + ' 层 | ' + Math.round(body.length / 1024) + 'KB'
+    ' | 命中层: ' + onLayers + ' | ' + layers.length + ' 层 | ' + Math.round(body.length / 1024) + 'KB' +
+    ' | 打分 ' + (scoreCard.latest.score == null ? '—' : scoreCard.latest.score + '/3')
   if (DRY) { console.log('[dry] ' + summary); return out }
   fs.writeFileSync(OUT_PATH, body)
   console.log('已写 margin-regime.json：' + summary)
@@ -394,5 +500,5 @@ function fmtPct(v) { return v == null ? '—' : (v * 100).toFixed(1) + '%' }
 if (require.main === module) {
   main().catch(e => { console.error('margin-regime 失败: ' + (e && e.message ? e.message : e)); process.exit(1) })
 } else {
-  module.exports = { SPEC, LAYER_DEFS, buildSeries, episodes, segObs, permCompare, gradeOf, markBars, matchProfile, median, mean, fwd }
+  module.exports = { SPEC, LAYER_DEFS, buildSeries, episodes, segObs, permCompare, gradeOf, markBars, matchProfile, median, mean, fwd, computeScore }
 }
