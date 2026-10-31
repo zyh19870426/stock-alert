@@ -224,18 +224,23 @@ async function main() {
   const out = REPORT.build(rows)
 
   /* 散户结构（拉萨系/家人们）：个股拥堵 + 9 大类参与度。
-     ★ fail-open：这一段任何异常都不许影响轮动主数据写盘（该页主体是八态，散户只是增强层）。 */
+     ★ fail-open：这一段任何异常都不许影响轮动主数据写盘（该页主体是八态，散户只是增强层）。
+     ★ 历史序列走 lasa-series.json 滚动存档（Actions 每日提交回仓库），不依赖本地定期重跑：
+       250 日分位窗口自己贴着今天走。存档缺失/损坏时 loadHist() 自动落回种子文件。 */
   try {
     const ledger = String(out.date || '').replace(/-/g, '')
     const iso = ledger.length === 8 ? ledger.slice(0, 4) + '-' + ledger.slice(4, 6) + '-' + ledger.slice(6, 8) : ''
-    const base = LASAB.loadBase()
+    const hist = LASAB.loadHist()
     const today = await LASAB.fetchToday(iso || undefined)
-    out.lasa = LASAB.buildLasa(base, today, today.date)
-    /* 序列只用于云端内部算分位，不下发：9 组 × 260 点约 100KB，移动端首屏不值当 */
+    out.lasa = LASAB.buildLasa(hist, today, today.date)
+    /* 序列不下发：9 组 × 260 点约 100KB，移动端首屏不值当。但**必须**写进滚动存档，
+       否则明天的分位窗口就退回去了。 */
+    const saved = LASAB.saveHist(out.lasa)
     delete out.lasa.series
     const st = out.lasa.stat
-    console.log('散户结构 ' + out.lasa.date + ' · 到榜 ' + st.listed + ' · 拉萨参与 ' + st.lasa +
-      ' · 触警 ' + st.hot + ' · 警示 ' + st.warn)
+    console.log('散户结构 ' + out.lasa.date + ' · 历史源 ' + (hist.src === 'rolling' ? '滚动' : '种子') +
+      ' · 到榜 ' + st.listed + ' · 拉萨参与 ' + st.lasa + ' · 触警 ' + st.hot + ' · 警示 ' + st.warn +
+      ' · 序列已存 ' + (saved ? 'Y' : 'N'))
   } catch (e) {
     console.log('⚠️ 散户结构抓取失败（不影响轮动页）：' + (e && e.message ? e.message : e))
   }

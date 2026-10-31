@@ -48,7 +48,12 @@ jobs:
             echo "本次未生成存档（非交易日 / 成功率不足 / 首次运行），跳过提交"
             exit 0
           fi
+          # ★ lasa-series.json 是散户参与度的**滚动历史存档**（约 30KB，只含 9 大类 × 260 日序列）。
+          #   它由 lasa-board.js 每天 append/替换当日值后写盘，提交回仓库后次次运行可直接读，
+          #   因此 250 日分位窗口永远贴着今天走 —— 不需要任何「每季度本地重跑」。
+          #   首次运行为空（回落到 lasa-board-base.json 种子），存在才 add。
           git add rotation.json
+          if [ -f lasa-series.json ]; then git add lasa-series.json; fi
           if ! git diff --cached --quiet; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

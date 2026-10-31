@@ -203,7 +203,37 @@ function loadBase (file) {
   return JSON.parse(fs.readFileSync(p, 'utf8'))
 }
 
-module.exports = { fetchToday, buildLasa, aggByGroup, mergeSeries, loadBase, THR_HOT, THR_WARN, MIN_AMT, isLasa }
+/* ---------- 滚动存档（★ 免去「每季度本地重跑」） ----------
+ * lasa-board-base.json 是**一次性种子**：9 大类 × 260 日历史 + 5580 只个股→大类映射（gmap，占 128KB 的绝大部分）。
+ * 上线后每天把当日值 append 进 lasa-series.json（只含 groups/series，约 30KB），Actions 提交回仓库；
+ * 次次run 优先读它 ⇒ 250 日分位窗口始终贴着今天走，不需要任何人工重跑。
+ * 若 rolling 文件缺失/损坏/被删 ⇒ 自动退回种子（fail-open，绝不因为存档问题算不出结果）。
+ * 只有一种情况仍需人工介入：**新增/重命名大类**（gmap 与种子在 base 里），此时重跑 _tmp_build_lasa_board.js。
+ */
+const SERIES_FILE = path.join(__dirname, 'lasa-series.json')
+
+function loadHist (baseFile) {
+  const base = loadBase(baseFile)
+  try {
+    const s = JSON.parse(fs.readFileSync(SERIES_FILE, 'utf8'))
+    const okG = Array.isArray(s && s.groups) && s.groups.length === (base.groups || []).length
+    const okS = s && s.series && Object.keys(s.series).length > 0
+    if (okG && okS) {
+      return { groups: s.groups, series: s.series, gmap: base.gmap || {}, date: s.date, src: 'rolling' }
+    }
+  } catch (e) { /* 不存在或损坏 → 落回种子 */ }
+  return Object.assign({ src: 'seed' }, base)
+}
+
+function saveHist (lasa) {
+  try {
+    const o = { v: 1, date: lasa.date, groups: (lasa.groups || []).map(g => g.g), series: lasa.series || {} }
+    fs.writeFileSync(SERIES_FILE, JSON.stringify(o))
+    return true
+  } catch (e) { return false }
+}
+
+module.exports = { fetchToday, buildLasa, aggByGroup, mergeSeries, loadBase, loadHist, saveHist, SERIES_FILE, THR_HOT, THR_WARN, MIN_AMT, isLasa }
 
 /* CLI：node lasa-board.js [--date YYYY-MM-DD] [--dry] */
 if (require.main === module) {
@@ -211,14 +241,16 @@ if (require.main === module) {
     const argv = process.argv.slice(2)
     const i = argv.indexOf('--date'); const DATE = i >= 0 ? argv[i + 1] : ''
     const DRY = argv.includes('--dry')
-    const base = loadBase()
+    const hist = loadHist()
+    console.log('历史来源：' + (hist.src === 'rolling' ? '滚动存档 ' + hist.date : '种子 ' + hist.date))
     const today = await fetchToday(DATE)
-    const out = buildLasa(base, today, today.date)
+    const out = buildLasa(hist, today, today.date)
     console.log(`数据日 ${out.date} · 到榜 ${out.stat.listed} 只 · 拉萨参与 ${out.stat.lasa} · 触警 ${out.stat.hot} · 警示 ${out.stat.warn}`)
     out.groups.forEach(g => console.log(`  ${g.g.padEnd(5)} ${g.part == null ? 'NA' : (g.part * 100).toFixed(2) + '%'} 分位 ${g.pct == null ? 'NA' : (g.pct * 100).toFixed(0) + '%'}  ${g.nStk == null ? '' : g.nStk + '只'} ${g.d}${g.stale ? '(滞后)' : ''}`))
     out.stocks.hot.forEach(s => console.log(`  ★ ${s.code} ${s.name} 占比 ${(s.share * 100).toFixed(1)}% 当日 ${(s.chg || 0).toFixed(1)}%`))
     if (DRY) { console.log('[dry] 不写盘'); return }
     fs.writeFileSync(path.join(__dirname, 'lasa.json'), JSON.stringify(out))
-    console.log('已写 lasa.json ' + (JSON.stringify(out).length / 1024).toFixed(0) + 'KB')
+    saveHist(out)
+    console.log('已写 lasa.json + lasa-series.json ' + (JSON.stringify(out).length / 1024).toFixed(0) + 'KB')
   })().catch(e => { console.error('失败：' + e.message); process.exit(1) })
 }
