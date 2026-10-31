@@ -35,6 +35,7 @@ const ROT = require('./rotation-state.js')
 const REPORT = require('./rotation-report.js')
 const TD = require('./trade-day.js')
 const BOARDS = require('./rotation-boards.json').boards
+const LASAB = require('./lasa-board.js')
 
 const OUT = path.join(__dirname, 'rotation.json')
 const DRY = process.argv.includes('--dry')
@@ -221,6 +222,24 @@ async function main() {
   }
 
   const out = REPORT.build(rows)
+
+  /* 散户结构（拉萨系/家人们）：个股拥堵 + 9 大类参与度。
+     ★ fail-open：这一段任何异常都不许影响轮动主数据写盘（该页主体是八态，散户只是增强层）。 */
+  try {
+    const ledger = String(out.date || '').replace(/-/g, '')
+    const iso = ledger.length === 8 ? ledger.slice(0, 4) + '-' + ledger.slice(4, 6) + '-' + ledger.slice(6, 8) : ''
+    const base = LASAB.loadBase()
+    const today = await LASAB.fetchToday(iso || undefined)
+    out.lasa = LASAB.buildLasa(base, today, today.date)
+    /* 序列只用于云端内部算分位，不下发：9 组 × 260 点约 100KB，移动端首屏不值当 */
+    delete out.lasa.series
+    const st = out.lasa.stat
+    console.log('散户结构 ' + out.lasa.date + ' · 到榜 ' + st.listed + ' · 拉萨参与 ' + st.lasa +
+      ' · 触警 ' + st.hot + ' · 警示 ' + st.warn)
+  } catch (e) {
+    console.log('⚠️ 散户结构抓取失败（不影响轮动页）：' + (e && e.message ? e.message : e))
+  }
+
   if (prev && prev.date === out.date) {
     /* 同一数据日重跑：保持幂等，仅刷新 generated */
   }
