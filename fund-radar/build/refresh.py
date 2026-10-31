@@ -37,7 +37,9 @@ STEPS = [
     ('04_score.py', '板块相关与打分'),
     ('05_holdings.py', '抓季报持仓'),
     ('06_final.py', '定榜与输出'),
-    ('97_pagecheck.js', '页面无头校验'),
+    # 注：97_pagecheck.js（无头校验 index.html 页面结构）不进云端流水线——
+    # 它要读 fund-radar/index.html，而该文件在前端仓（随站点部署），云端仓只有 build/ + data/。
+    # 页面结构校验留在本地方便改页面时跑；云端只负责重算数据，用 99_selftest 守数据质量。
     ('99_selftest.py', '交付前自检'),
 ]
 
