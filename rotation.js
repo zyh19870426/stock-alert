@@ -160,8 +160,11 @@ async function main() {
   let g = null
   try { g = await TD.gate(t) } catch (e) { console.log('⚠️ 交易日判定异常，按原流程继续：' + e.message) }
   if (g && g.isTrading === false) {
-    console.log('非交易日（' + TD.describe(g) + '）→ 跳过，不写盘')
-    return
+    // ★ 不再直接跳过：GitHub Actions 的 scheduled cron 常漂移数小时、跨到周末/次日，
+    //   若在此 return 会导致存档长期停滞（2026-10-24 起全部误判非交易日而跳过）。
+    //   同花顺年度文件本身只含到「最近交易日」的数据，写出的 date 不会超前，
+    //   且下方 SUCCESS_FLOOR(60%) 成功率闸门仍会拦截真正抓取失败的场次。幂等安全。
+    console.log('判定日 ' + t + ' 非交易日（' + TD.describe(g) + '）→ 仍按最新可用板块日线写盘（数据日由 bars 决定）')
   }
   if (g && g.isTrading === null) console.log('⚠️ 交易日历与行情时间戳都取不到（' + TD.describe(g) + '），按原流程继续')
 
