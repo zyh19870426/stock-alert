@@ -1,0 +1,67 @@
+name: fund-radar-daily
+
+# 基金雷达数据日更：每个交易日收盘后重算 fund-radar/data/data.json（候选池→净值→板块ETF→
+# 广度→打分→持仓→定榜→无头校验→自检），提交回仓库，供 /fund-radar/index.html 运行时
+# 从云端（jsDelivr/raw）拉取。
+#
+# 与轮动/筹码/资金流同架构：数据存在云端仓、由定时任务重算、前端运行时读取，
+# 因此页面永不静默过期（fail-open：refresh.py 任一步失败即停、不写半成品、不提交）。
+#
+# 数据源=天天基金排行榜（候选池）+ 东财基金净值/规模/经理 + 腾讯板块ETF日线 + 季报前十大持仓。
+# 这些源在 GitHub Actions 运行器上已验证可达（flow/chips/margin 等同类管线均在此环境取数）。
+#
+# cron 用 UTC：北京 21:30 = UTC 13:30（基金净值一般 20:00-21:00 更新完毕，留足缓冲）。
+on:
+  schedule:
+    - cron: '30 13 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fund-radar-daily
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # 全流水线约 2~4 分钟（02_nav 抓 103 只基金净值最慢，约 2 分钟），给足预算；
+    # 遇 504 限流由脚本内退避处理。refresh.py 任一步非 0 即停、不写半成品。
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run fund-radar refresh
+        run: python fund-radar/build/refresh.py
+
+      - name: Commit data
+        run: |
+          if [ ! -f fund-radar/data/data.json ]; then
+            echo "本次未生成 data.json（refresh.py 中途失败），跳过提交"
+            exit 0
+          fi
+          git add fund-radar/data/data.json
+          if ! git diff --cached --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: update fund-radar data [skip ci]"
+            git pull --rebase --autostash origin ${GITHUB_REF_NAME} || true
+            git push || (sleep 5 && git pull --rebase --autostash origin ${GITHUB_REF_NAME} && git push)
+          else
+            echo "数据无变化"
+          fi
+
+      # 清 jsDelivr 分支缓存（@main 约 12h）—— 否则前端 jsDelivr 兜底源会长时间返回昨日旧档
+      - name: Purge jsDelivr cache
+        run: |
+          curl -sS --max-time 20 "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@${GITHUB_REF_NAME}/fund-radar/data/data.json" || true
+          echo "purged fund-radar/data/data.json"
