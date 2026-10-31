@@ -200,6 +200,50 @@ async function main() {
   console.log('  ' + (wfFng.ok === false ? '❌' : wfFng.ok === null ? '➖' : '✅') + ' 恐贪任务：' + wfFng.detail)
   if (wfFng.ok === false) problems.push(wfFng.detail)
 
+  // ---- 全量数据存档「新鲜度」巡检（★ 2026-10-31 新增：解决"东财接口断了、页面静默陈旧"）----
+  // 直接拉用户实际看到的 raw 存档，比对"最近交易日"，任一份过期即告警（不再只看 workflow 是否跑成功）。
+  const RAW = 'https://raw.githubusercontent.com/'
+  async function fetchRawText(url){
+    const ac = new AbortController(); const to = setTimeout(() => ac.abort(), 20000)
+    try {
+      const headers = (TOKEN) ? { 'Authorization': 'Bearer ' + TOKEN, 'User-Agent': 'stock-alert-hb' }
+                              : { 'User-Agent': 'stock-alert-hb' }
+      const r = await fetch(url, { headers, signal: ac.signal })
+      if(!r.ok) throw new Error('HTTP ' + r.status)
+      return await r.text()
+    } finally { clearTimeout(to) }
+  }
+  function normDate(d){
+    if(!d) return ''
+    d = String(d).replace(/-/g, '')
+    return d.length === 8 ? (d.slice(0,4) + '-' + d.slice(4,6) + '-' + d.slice(6,8)) : ''
+  }
+  async function checkArchiveFresh(name, repo, file, dateFn){
+    const url = RAW + repo + '/main/' + file + '?t=' + Date.now()
+    let raw
+    try { raw = await fetchRawText(url) } catch(e){ return { ok: null, detail: name + ' 拉取失败：' + (e && e.message) } }
+    let j
+    try { j = JSON.parse(raw) } catch(e){ return { ok: null, detail: name + ' 解析失败（接口/网络异常）' } }
+    const d = normDate(dateFn(j))
+    if(!d) return { ok: null, detail: name + ' 读不到日期字段' }
+    const lastD = td.lastD
+    const ok = d >= lastD
+    return { ok: ok, detail: name + ' 存档日期 ' + d + '（最近交易日 ' + lastD + '）' + (ok ? ' ✅' : ' ❌ 已过期') }
+  }
+  const freshChecks = [
+    await checkArchiveFresh('板块轮动 rotation', 'zyh19870426/stock-alert-console', 'rotation.json', j => j.date),
+    await checkArchiveFresh('筹码透视 chips', 'zyh19870426/stock-alert', 'chips-history.json', j => j.updatedAt),
+    await checkArchiveFresh('资金流 flow', 'zyh19870426/stock-alert', 'flow-history.json', j => j.updated),
+    await checkArchiveFresh('两融 regime', 'zyh19870426/stock-alert', 'margin-regime.json', j => j.date),
+    await checkArchiveFresh('两融 sector', 'zyh19870426/stock-alert', 'margin-sector-history.json', j => j.date),
+    await checkArchiveFresh('拉萨系列 lasa', 'zyh19870426/stock-alert', 'lasa-series.json', j => j.date)
+  ]
+  freshChecks.forEach(function(c){
+    checks.push(c)
+    console.log('  ' + (c.ok === false ? '❌' : c.ok === null ? '➖' : '✅') + ' ' + c.detail)
+    if(c.ok === false) problems.push(c.detail)
+  })
+
   if (problems.length) {
     console.log('')
     console.log('  ⚠️ 发现 ' + problems.length + ' 个问题')
@@ -234,6 +278,9 @@ async function alert(cfg, problems, checks) {
   body.push('2) Actions 免费额度用完了 → 到 Settings → Billing 查看；额度会在月初重置')
   body.push('3) 仓库长时间无活动被暂停定时任务 → 到 Actions 页面点一次 Enable / 手动 Run')
   body.push('4) 推送通道欠费或密钥失效 → 检查 Server酱 余额与 SendKey')
+  body.push('5) 若仅"某份存档过期"而非整体失败，多为东财接口临时被封/字段变动 → 看对应 workflow')
+  body.push('   （rotation/flow/margin/chips 在 stock-alert 仓、rotation 前端存档在 stock-alert-console 仓）日志里的 http 状态；')
+  body.push('   各管线已做多域名兜底，多数次日自动恢复，但连续两天过期需查源码域名池是否要更新。')
   body.push('')
   body.push('注意：如果连这条告警你都收不到，说明推送通道本身也断了。')
   if (DRY) { console.log(body.join('\n')); return }
