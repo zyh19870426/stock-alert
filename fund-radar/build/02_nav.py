@@ -154,18 +154,25 @@ def one(d):
     acw = jload(t, 'Data_ACWorthTrend', [])
 
     # 优先累计净值（含分红）；缺失则退回单位净值
+    # ★ 2026-11-01 时区修正：东财 pingzhongdata 的时间戳是「北京 0 点」（=前一天 16:00 UTC）。
+    #   原用 time.localtime() 会随 runner 时区漂移——GitHub Actions 是 UTC，导致整条序列日期
+    #   全部早一天（实测本地 UTC+8 末点 10-30，云端 UTC 末点 10-29）。改为显式 +8h 再 gmtime，
+    #   无论 runner 在哪个时区都渲染成北京日期。
+    def _bj_date(ms):
+        return time.strftime('%Y-%m-%d', time.gmtime(int(ms) / 1000 + 8 * 3600))
+
     series = []
     if acw and len(acw) > 130:
         for p in acw:
             try:
-                series.append((time.strftime('%Y-%m-%d', time.localtime(int(p[0]) / 1000)), float(p[1])))
+                series.append((_bj_date(p[0]), float(p[1])))
             except Exception:
                 pass
     if len(series) < 130:
         series = []
         for p in netw:
             try:
-                series.append((time.strftime('%Y-%m-%d', time.localtime(int(p['x']) / 1000)), float(p['y'])))
+                series.append((_bj_date(p['x']), float(p['y'])))
             except Exception:
                 pass
     if len(series) < 130:
