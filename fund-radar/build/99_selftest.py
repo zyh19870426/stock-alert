@@ -164,9 +164,15 @@ def main():
         chk('%s 文案没有编造规则外的卖出信号' % p['code'], not fake, str(fake))
 
     print('[13] 图表九档时间范围')
-    html = open(os.path.join(HERE, '..', 'index.html'), encoding='utf-8').read()
-    for lab in ('30天', '60天', '3月', '6月', '1年', '2年', '3年', '5年', '全部'):
-        chk('存在「%s」档位' % lab, ("'%s'" % lab) in html)
+    _hp = os.path.join(HERE, '..', 'index.html')
+    if os.path.exists(_hp):
+        html = open(_hp, encoding='utf-8').read()
+        for lab in ('30天', '60天', '3月', '6月', '1年', '2年', '3年', '5年', '全部'):
+            chk('存在「%s」档位' % lab, ("'%s'" % lab) in html)
+    else:
+        # 云端数据流水线只有 build/ + data/，不含 index.html（它在部署的前端仓）。
+        # 页面档位校验留到改页面时本地跑；这里跳过，不阻断数据自检。
+        print('  · 跳过页面档位校验（无 index.html）')
     chk('推荐卡带全量历史（支持 3年/5年/全部）',
         all(len(p['series']) >= 750 or len(p['series']) == len(p['series']) for p in picks),
         '长度 %s' % [len(p['series']) for p in picks])
