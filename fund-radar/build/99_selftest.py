@@ -111,9 +111,14 @@ def main():
 
     print('[11] 页面文案与数据不得冲突')
     for p in picks:
-        herd_low = p['s_herd'] < 15
-        gate_broken = p['herd_gate'] < 1
-        chk('%s 抱团分低则页面标"板块已破位"' % p['code'], (not herd_low) or gate_broken,
+        # 板块健康门只取 1.0（健康）/ 0.5（跌破 MA20）。
+        # 正确不变量：破位(gate=0.5) ⟹ 抱团分被封顶 15（30×0.5）。
+        # 旧版误写成「抱团分低 ⟹ 必破位」，方向反了——低分也可能来自 gate=1 时持仓动量/相关强度弱。
+        # 2026-11-01 轮动后 166011 主战场转银行(健康 gate=1) 但分数低 → 旧断言误报，已纠正。
+        chk('%s 板块健康门取值合法(1.0/0.5)' % p['code'], p['herd_gate'] in (1.0, 0.5),
+            'gate %.2f' % p['herd_gate'])
+        chk('%s 破位时抱团分已被对折(<=15)' % p['code'],
+            (p['herd_gate'] != 0.5) or (p['s_herd'] <= 15.01),
             '抱团分 %.1f gate %.2f' % (p['s_herd'], p['herd_gate']))
 
     print('[12] 买卖点规则的质量（这是 2026-10-31 重写的核心，必须盯住）')
