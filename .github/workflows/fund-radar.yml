@@ -50,6 +50,8 @@ jobs:
             exit 0
           fi
           git add fund-radar/data/data.json
+          # 信号台账（2026-11-01）：每天追加一条推荐记录，用于前向验证
+          [ -f fund-radar/data/signal-log.json ] && git add fund-radar/data/signal-log.json
           if ! git diff --cached --quiet; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

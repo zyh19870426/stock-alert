@@ -33,8 +33,25 @@ def main():
     print('')
 
     print('[1] 推荐结构')
-    chk('恰好 3 只推荐', len(picks) == 3, '实际 %d' % len(picks))
-    chk('三只代码不重复', len({p['code'] for p in picks}) == len(picks))
+    # 2026-11-01 改：推荐不再强制 3 只。规则是「同一板块只取最优、宁缺毋滥」，
+    # 凑不满 3 只时必须写明挡住了什么（meta.picks_note），不许硬凑低分/破位基金。
+    chk('推荐 1~3 只', 1 <= len(picks) <= 3, '实际 %d' % len(picks))
+    chk('推荐代码不重复', len({p['code'] for p in picks}) == len(picks))
+    if len(picks) < 3:
+        chk('不足 3 只时写明原因', bool(meta.get('picks_note')),
+            'meta.picks_note 为空')
+    chk('推荐之间不押同一个板块（同注去重）',
+        len({p.get('arena') for p in picks}) == len(picks),
+        '板块: %s' % [p.get('arena') for p in picks])
+    for p in picks:
+        chk('%s 板块未破位才进推荐' % p['code'], (p.get('herd_gate') or 0) >= 1.0,
+            'gate %.2f' % (p.get('herd_gate') or 0))
+        chk('%s 总分不低于池中位' % p['code'], p['score'] >= (meta.get('pool_median') or 0) - 0.05,
+            '%.1f vs 中位 %.1f' % (p['score'], meta.get('pool_median') or 0))
+        chk('%s 带 role 与持仓覆盖率' % p['code'],
+            p.get('role') in ('best', 'spread') and p.get('hold_cover') is not None,
+            'role=%s cover=%s' % (p.get('role'), p.get('hold_cover')))
+        chk('%s 带主战场相关性' % p['code'], p.get('arena_corr') is not None)
 
     print('[2] 趋势门槛（页面写的是"处于上涨趋势"）')
     for p in picks:

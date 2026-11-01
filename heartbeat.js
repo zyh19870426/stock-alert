@@ -236,7 +236,12 @@ async function main() {
     await checkArchiveFresh('资金流 flow', 'zyh19870426/stock-alert', 'flow-history.json', j => j.updated),
     await checkArchiveFresh('两融 regime', 'zyh19870426/stock-alert', 'margin-regime.json', j => j.date),
     await checkArchiveFresh('两融 sector', 'zyh19870426/stock-alert', 'margin-sector-history.json', j => j.date),
-    await checkArchiveFresh('拉萨系列 lasa', 'zyh19870426/stock-alert', 'lasa-series.json', j => j.date)
+    await checkArchiveFresh('拉萨系列 lasa', 'zyh19870426/stock-alert', 'lasa-series.json', j => j.date),
+    // 基金雷达（2026-11-01 补）：此前漏检，云端连跑失败时页面会静默停留在旧快照。
+    // 这里判的是「生成日期」而不是「净值日期」—— 净值源本身可能晚一天更新（QDII 尤其），
+    // 用净值日判会把「数据源延迟」误报成「任务失败」；任务有没有跑，看 gen 最准。
+    await checkArchiveFresh('基金雷达 fund-radar', 'zyh19870426/stock-alert', 'fund-radar/data/data.json',
+      j => (j.meta && j.meta.gen) ? String(j.meta.gen).slice(0, 10) : '')
   ]
   freshChecks.forEach(function(c){
     checks.push(c)

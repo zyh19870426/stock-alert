@@ -5,16 +5,35 @@
 抱团分（30 分）口径（这是本系统最核心的判断，写清楚以便被推翻）：
    持仓加权板块动量 = Σ(前十大权重占比 × 该行业代表ETF的动量百分位)
    抱团分 = 30 × (0.60 × 持仓加权动量 + 0.40 × 相关强度) × 板块健康门
-     · 相关强度 = clamp((净值与主战场板块60日相关性 - 0.55) / 0.40, 0, 1)
-     · 板块健康门：主战场 ETF 跌破 MA20 → ×0.5（抱团已瓦解，不算踩中）
-   若该基金拿不到持仓，退回用主战场动量代替持仓加权动量（页面上标注「按净值推断」）
+     · 相关强度 = clamp((净值与「押的那个板块」60日相关性 - 0.55) / 0.40, 0, 1)
+     · 板块健康门：「押的那个板块」ETF 跌破 MA20 → ×0.5（抱团已瓦解，不算踩中）
+   若该基金拿不到持仓，退回用相关性最高板块代替（页面上标注「按净值推断」）
+
+★★ 2026-11-01 口径修正（9D_audit.py 量出来的）：
+   原来「押的板块」有两个定义并存 —— 页面文案用 arena（持仓第一大行业），
+   而上面的相关强度与健康门用的是 main_sector（60 日相关性最高的板块）。
+   实测 16 只里 5 只（31%）两者不同，其中 010328 押银行、却拿「芯片设计」判健康门，
+   且它与银行的相关性是 **-0.309**（负相关！）。
+   现统一为：动量/相关强度/健康门 **全部用 arena**，并新增三个披露字段：
+     arena_corr    净值与 arena 板块的 60 日相关性
+     arena_healthy 该板块是否健康（跌破 MA20 -> 0.5）
+     align         'aligned' 一致 / 'split' 持仓与走势不是同一个板块 / 'nav' 无持仓按净值推断
+   当 arena_corr < 0.50 时 align 记为 'split'，页面必须标注「它持仓押这个板块，
+   但净值走势跟这个板块关系很弱」——这是两个事实，不能合并成一句话。
 
 ★ 已知偏差（必须告诉用户）：ETF 是板块代理，不是基金的真实持仓。
   实测：中航趋势领航等基金重仓的是「汽零转型机器人」小票（福赛/斯菱/新泉），
   与中证机器人指数（汇川/埃斯顿）成分差别很大 → 这类基金的抱团分被系统性低估。
 
-三只推荐规则：按总分排序，但**主战场去重**——同一板块只取一只。
-  理由：三只如果都是银行，等于买了一只，分散不了。
+推荐规则（2026-11-01 重写）：质量优先 + 同注去重，**宁缺毋滥**。
+   ① 候选池先剔掉「板块已破位」的（herd_gate < 1）——破位的板块不算抱团，不该进推荐
+   ② 前两只：按总分降序，同注去重（90 日相关性 >= 0.75 视为同一个赌注，只留最优那只）
+   ③ 第三只（分散位）：方向（arena）与已选不同 + 近3月为正 + 与已选相关性 < 0.60 + 总分 >= 池中位
+   ④ 满足不了就只给 2 只，并在 picks_note 里写明原因，不硬凑
+   ★ 为什么加 ①②：2026-10-30 那版第 3 只 166011 只有 50.6 分、板块已破位、
+     而备选池里有 84.9 分的 ——「优中选优」里出现一只破位低分基金，是呈现层的硬伤。
+   ★ 每只都带 role：'front'（分数入选）/ 'spread'（分散入选），并给出
+     score_gap_best（比第 1 名低多少分），让「为了分散付出的代价」可见。
 输出：数据/data.json
 """
 import json, os, math
@@ -29,6 +48,28 @@ def load(n):
 
 def clamp(v, a=0.0, b=1.0):
     return max(a, min(b, v))
+
+
+def _rets(pairs):
+    """[(date, v)] -> {date: pct}"""
+    return {pairs[i][0]: pairs[i][1] / pairs[i - 1][1] - 1
+            for i in range(1, len(pairs)) if pairs[i - 1][1]}
+
+
+def _corr60(fr, sr):
+    """60 日收益率相关性（与 04_score.py 同口径，便于两边数字对得上）"""
+    ks = sorted(set(fr) & set(sr))[-60:]
+    if len(ks) < 30:
+        return None
+    x = [fr[k] for k in ks]; y = [sr[k] for k in ks]
+    n = len(x)
+    mx, my = sum(x) / n, sum(y) / n
+    sxy = sum((x[i] - mx) * (y[i] - my) for i in range(n))
+    sxx = sum((x[i] - mx) ** 2 for i in range(n))
+    syy = sum((y[i] - my) ** 2 for i in range(n))
+    if sxx <= 0 or syy <= 0:
+        return 0.0
+    return sxy / math.sqrt(sxx * syy)
 
 
 def ma(vs, n):
@@ -107,6 +148,14 @@ RULE = dict(
     s_look=40,            # S3 回看多少日内出现过高位
     s_cool=30,            # S4 信号冷却（交易日）
     s_dd120=-0.18,        # S5 硬止损：距 120 日高点回撤
+    # ★ 2026-11-01 价位三档（9D_audit.py 实测，22 只基金 / 3127 采样点，每 5 日取样）
+    #   pos60<10%  训练 n=256 60日中位 +5.57% 胜率 73.4% | 验证 +2.85% 64.8%，5%分位比基线更小
+    #   pos60 10-20% 训练 +3.15% 68.6% | 验证 +1.87% 58.8%
+    #   pos60 20-40% 训练 +2.03% 61.1% | 验证 +2.56% 66.5%
+    #   pos60 >40%  训练 +0.89%（低于基线 +1.63%）→ 所以 40% 以上不给买点
+    pos_tier_deep=0.10,   # 深度便宜区上界
+    pos_tier_cheap=0.25,  # 便宜区上界
+    pos_tier_fair=0.40,   # 合理区上界（= b_pos60_max，两者必须一致，自检盯着）
 )
 
 
@@ -198,6 +247,29 @@ def advice(f, SECS=None):
     seg60 = vs[-60:]
     lo60, hi60 = min(seg60), max(seg60)
     buy_line = round(lo60 + RULE['b_pos60_max'] * (hi60 - lo60), 4)   # 60日区间 40% 分位对应的净值
+    # ---- 价位三档（阈值与收益见 RULE 注释，由 9D_audit.py 实测）----
+    def _price_at(p):
+        return round(lo60 + p * (hi60 - lo60), 4)
+    tier_lines = dict(deep=_price_at(RULE['pos_tier_deep']),
+                      cheap=_price_at(RULE['pos_tier_cheap']),
+                      fair=_price_at(RULE['pos_tier_fair']))
+    if pos60 <= RULE['pos_tier_deep']:
+        tier, tier_name, tier_tone = 'deep', '深度便宜区', 'good'
+        tier_txt = ('净值在近 60 日区间的下 10%。实测这一档之后 60 个交易日：中位 +5.57%、胜率 73.4%'
+                    '（训练段 n=256），验证段 +2.85%；而且 5% 最差情形比「随便哪天买」还浅。'
+                    '便宜到这个程度，下行风险反而更小 —— 这是全系统统计上最划算的一档。')
+    elif pos60 <= RULE['pos_tier_cheap']:
+        tier, tier_name, tier_tone = 'cheap', '便宜区', 'ok'
+        tier_txt = ('净值在近 60 日区间的 10%~25%。实测这一档之后 60 个交易日中位 +3.15%、胜率 68.6%'
+                    '（训练段 n=140），验证段 +1.87% —— 比深度便宜区略差，但仍是正超额。')
+    elif pos60 <= RULE['pos_tier_fair']:
+        tier, tier_name, tier_tone = 'fair', '合理区', 'ok'
+        tier_txt = ('净值在近 60 日区间的 25%~40%。实测这一档之后 60 个交易日中位 +2.03%、胜率 61.1%'
+                    '（训练段），验证段 +2.56% —— 温和正超额，是「可以买」的下沿。')
+    else:
+        tier, tier_name, tier_tone = 'high', '偏高区', 'warn'
+        tier_txt = ('净值在近 60 日区间的 40% 以上。实测这一档之后 60 个交易日中位 +0.89%，'
+                    '低于「随便哪天买」的 +1.63% —— 涨高了再买，统计上是负超额，这就是规则不给买点的原因。')
     stop = round(a60, 4)          # 60 日均线。它只是买点的趋势条件，**不是卖出信号**
     trend_up = a20 > a60 and not a60_dn
     sec_ok = bool(s3['above60']) if s3 else True
@@ -323,12 +395,21 @@ def advice(f, SECS=None):
                '买入信号和卖出信号都不成立。已经买了的：%s 都没触发，规则上没有动作。'
                '还没买的：先不动，等方向出来。' % (round(a20, 4), stop, s_line))
 
+    # ★ 价位结论必须跟着一起说：state 讲的是「趋势+板块」是否确认，tier 讲的是「贵不贵」，
+    #   两者可以不一致（深度便宜区里趋势往往还没转好）。不补这句，用户会觉得自相矛盾。
+    if tier == 'deep':
+        act += (' 另外看价位：它现在在「深度便宜区」（近 60 日区间下 10%），'
+                '这一档历史上是收益最好的一档；但历史中位好不等于买了就涨，'
+                '要不要在便宜区左侧分批，取决于你能不能承受它继续跌。')
+
     return dict(state=state, tone=tone, act=act,
                 buy_line=buy_line, buy_lo=round(lo60, 4), buy_hi=round(hi60, 4),
                 stop=stop, trigger_up=round(a20, 4), pos60=pos60, dd120=dd120,
                 sec_ok=sec_ok, mom_rk=(round(rk, 2) if rk is not None else None),
                 a60_dn=a60_dn, trend_up=trend_up, rule=RULE,
                 sig=sig, next=nxt, stop_price=stop_price, hi120=round(hi120, 4),
+                pos_tier=tier, pos_tier_name=tier_name, pos_tier_tone=tier_tone,
+                pos_tier_txt=tier_txt, tier_lines=tier_lines,
                 rank_max40=(round(rank_max40, 2) if rank_max40 is not None else None))
     # 注：曾有一个 line_crossed 字段（"离场线高于低位线"），已删除。理由是它不成立：
     #   1) 它只是「60日均线 > 60日区间40%分位」，上涨后必然为真，不是异常信号；
@@ -410,6 +491,9 @@ def main():
     secs = {s['label']: s for s in sc['sectors']}
     mom_of = {k: v['mom'] for k, v in secs.items()}
     uni = {d['code']: d for d in load('universe.json')}
+    # 原始板块日线：算「净值 vs 押的板块」的真实相关性（04 只存了相关性 top3，押的板块未必在里面）
+    SRAW = json.load(open(os.path.join(HERE, 'sectors.json'), encoding='utf-8'))
+    SEC_RET = {s['label']: _rets(s['k']) for s in SRAW}
 
     pool = sc['scored']
     for f in pool:
@@ -429,6 +513,10 @@ def main():
                 num += w * mv
                 den += w
             f['hold_mom'] = round(num / den, 4) if den else 0.5
+            # 持仓 → ETF 映射覆盖率：对不上 ETF 的行业按 0.5 中位并降权，
+            # 覆盖率低时抱团分基本是常数，页面必须披露（实测最低 28.6%）
+            hit = sum(x['pct'] for x in lst if x['sector'] in mom_of)
+            f['hold_cover'] = round(hit / tot, 3) if tot else 0.0
             f['expo'] = h['expo']
             f['top10'] = h['quarters'][0]['list']
             f['q_label'] = h['quarters'][0]['label']
@@ -441,21 +529,42 @@ def main():
                 f['prev_label'] = h['quarters'][1]['label']
         else:
             f['hold_mom'] = f['main_mom']
+            f['hold_cover'] = 0.0
             f['expo'] = []
             f['top10'] = []
             f['q_label'] = ''
             f['top10_sum'] = 0
             f['new_in'], f['dropped'] = [], []
 
-        strength = clamp((f['main_corr'] - 0.55) / 0.40)
+        # ---------- 主战场统一用 arena（持仓第一大行业），拿不到持仓才退回相关性最高板块 ----------
+        arena = f['expo'][0]['sector'] if f['expo'] else f['main_sector']
+        f['arena'] = arena
+        f['arena_mom'] = mom_of.get(arena, f['main_mom'])
+        a_corr = None
+        if arena in SEC_RET:
+            a_corr = _corr60(_rets(f['series']), SEC_RET[arena])
+        inferred_from_nav = a_corr is None
+        if inferred_from_nav:
+            a_corr = f['main_corr']
+        a_healthy = bool(secs[arena]['healthy']) if arena in secs else bool(f['main_healthy'])
+        f['arena_corr'] = round(a_corr, 3)
+        f['arena_healthy'] = a_healthy
+        # align 只描述「两个口径是不是同一个板块」，不评价好坏；weak 表示净值根本没跟着这个板块走
+        if not f['expo']:
+            f['align'] = 'nav'
+        elif arena == f['main_sector']:
+            f['align'] = 'aligned'
+        else:
+            f['align'] = 'split'
+        f['arena_weak'] = bool(a_corr is not None and a_corr < 0.50)
+
+        strength = clamp((a_corr - 0.55) / 0.40)
         base = 0.60 * f['hold_mom'] + 0.40 * strength
-        gate = 1.0 if f['main_healthy'] else 0.5
+        gate = 1.0 if a_healthy else 0.5
         f['s_herd'] = round(30 * base * gate, 2)
         f['herd_gate'] = gate
         f['score'] = round(f['s_ret'] + f['s_trend'] + f['s_herd'] + f['s_risk'], 1)
-        # 持仓为主战场（有持仓就用持仓最大行业，更可信）
-        f['arena'] = f['expo'][0]['sector'] if f['expo'] else f['main_sector']
-        f['arena_mom'] = mom_of.get(f['arena'], f['main_mom'])
+        f['_inferred'] = inferred_from_nav
 
     pool.sort(key=lambda x: -x['score'])
 
@@ -477,39 +586,52 @@ def main():
         syy = sum((y[i] - my) ** 2 for i in range(n))
         return sxy / math.sqrt(sxx * syy) if sxx > 0 and syy > 0 else 0.0
 
-    # ---- 三只推荐 ----
-    # 规则（可复现）：
-    #   ① 先取分数最高的 2 只，且二者 90 日相关性 < 0.75（否则视为同一个赌注，跳过）
-    #   ② 第 3 只：与已选方向（arena）不同、近3月 > 0、且与已选相关性 < 0.60 的最高分者
-    #   ③ 若②找不到，退回按①继续取（宁缺毋滥，少于 3 只就如实说明）
+    # ---- 推荐：质量优先 + 同注去重，宁缺毋滥 ----
+    # ① 硬门槛一：板块未破位（herd_gate >= 1）。破位的板块不算抱团，不该进推荐。
+    # ② 硬门槛二：总分 >= 池中位。破位之外，也不许拿低分基金凑数。
+    # ③ ★同注去重按「板块」判（2026-11-01 修正）：同一 arena 只取分数最高的一只。
+    #    ——README 一直写的是「同一板块只取一只」，但代码此前按 90 日相关性 <0.75 去重，
+    #      于是「两只都押银行」只要相关性不到 0.75 就都会入选，等于同一注下两次。
+    #      用户原话：「两只基都是银行，他就会选最优的。」现在按这个来。
+    # ④ 再加一道相关性闸：不同板块但走势雷同（>=0.75）仍算同一个赌注。
+    # ⑤ 凑不满 3 只就如实给更少，并在 picks_note 里写明挡住了什么。
+    scores_sorted = sorted(f['score'] for f in pool)
+    pool_med = scores_sorted[len(pool) // 2] if scores_sorted else 0
+    qual = [f for f in pool if f['herd_gate'] >= 1.0 and f['score'] >= pool_med]
     picks = []
-    for f in pool:
-        if len(picks) >= 2:
+    used_arena = set()
+    for f in qual:
+        if len(picks) >= 3:
             break
+        if f['arena'] in used_arena:
+            continue
         if any(pcorr(f['code'], p['code']) >= 0.75 for p in picks):
             continue
         picks.append(f)
-    third = None
-    for f in pool:
-        if f in picks:
-            continue
-        if f['arena'] in [p['arena'] for p in picks]:
-            continue
-        if (f['m']['r3m'] or 0) <= 0:
-            continue
-        if any(pcorr(f['code'], p['code']) >= 0.60 for p in picks):
-            continue
-        third = f
-        break
-    if third:
-        picks.append(third)
+        used_arena.add(f['arena'])
+
+    best_score = pool[0]['score'] if pool else 0
+    rank_of = {f['code']: i + 1 for i, f in enumerate(pool)}
+    picked_codes = {f['code'] for f in picks}
+    for i, f in enumerate(picks):
+        f['role'] = 'best' if i == 0 else 'spread'
+        f['score_gap_best'] = round(best_score - f['score'], 1)
+        f['rank_in_pool'] = rank_of.get(f['code'])
+    n_gate_bad = sum(1 for f in pool if f['herd_gate'] < 1.0)
+    n_same_arena = sum(1 for f in qual
+                       if f['code'] not in picked_codes and f['arena'] in used_arena)
+    if len(picks) >= 3:
+        picks_note = ''
     else:
-        for f in pool:
-            if len(picks) >= 3:
-                break
-            if f in picks or any(pcorr(f['code'], p['code']) >= 0.75 for p in picks):
-                continue
-            picks.append(f)
+        bits = []
+        if n_gate_bad:
+            bits.append('%d 只的板块已破位（不算抱团）' % n_gate_bad)
+        if n_same_arena:
+            bits.append('%d 只同样押「%s」已按同注去重只留最优' % (
+                n_same_arena, '、'.join(sorted(used_arena))))
+        picks_note = ('今天只给 %d 只：%d 只候选里 %s。'
+                      '按「同一板块只取最优、宁缺毋滥」，不为了凑满 3 只去推一只破位、'
+                      '或者押同一个板块的基金。' % (len(picks), len(pool), '；'.join(bits)))
     for f in picks:
         f['corr_with'] = [dict(code=p['code'], name=p['name'], corr=round(pcorr(f['code'], p['code']), 2))
                           for p in picks if p is not f]
@@ -538,7 +660,11 @@ def main():
             corr_with=f.get('corr_with', []),
             corr_p1=(round(pcorr(f['code'], picks[0]['code']), 2) if picks and f['code'] != picks[0]['code'] else None),
             has_hold=f['has_hold'], herd_gate=f['herd_gate'],
-            hold_mom=f['hold_mom'],
+            hold_mom=f['hold_mom'], hold_cover=f.get('hold_cover'),
+            role=f.get('role'), score_gap_best=f.get('score_gap_best'),
+            rank_in_pool=f.get('rank_in_pool'),
+            arena_corr=f.get('arena_corr'), arena_healthy=f.get('arena_healthy'),
+            align=f.get('align'), arena_weak=f.get('arena_weak'),
             r_y2=f['m'].get('r2y'), r_y3=f['m'].get('r3y'), r_ytd=f['m'].get('ytd'),
             r_since=f['m'].get('since'), inception=u.get('est'),
             series=pack_series(f['series'], n),
@@ -564,12 +690,38 @@ def main():
     cnt = Counter(f['arena'] for f in pool)
     top_arena, top_n = cnt.most_common(1)[0] if cnt else ('', 0)
 
+    # ---- 历史信号的表现（前向验证的入口）：上一次推荐到现在，到底赚没赚 ----
+    # 只用「当前净值回溯」算，不做任何假设；基金已不在池内就跳过（不虚构）
+    slog_path = os.path.join(HERE, '..', 'data', 'signal-log.json')
+    try:
+        prev_log = json.load(open(slog_path, encoding='utf-8')) if os.path.exists(slog_path) else []
+    except Exception:
+        prev_log = []
+    series_of = {x['code']: dict(x['series']) for x in sc['all']}
+    today_d = pool[0]['m']['last_date']
+    sig_perf = []
+    for rec in prev_log[-6:]:
+        if rec.get('date') == today_d:
+            continue
+        items = []
+        for pk in rec.get('picks', []):
+            s = series_of.get(pk['code'])
+            if not s or rec['date'] not in s or today_d not in s or not s[rec['date']]:
+                continue
+            items.append(dict(code=pk['code'], name=pk.get('name', ''), score=pk.get('score'),
+                              ret=round(s[today_d] / s[rec['date']] - 1, 4)))
+        if items:
+            sig_perf.append(dict(date=rec['date'], items=items))
+
     out = dict(
         meta=dict(gen=__import__('time').strftime('%Y-%m-%d %H:%M'),
                   data_date=pool[0]['m']['last_date'],
                   n_pool=len(sc['all']), n_scored=gate_ok,
                   n_gate=gate_ok, n_short=len(short_final), n_dropped_neg3m=dropped,
                   top_arena=top_arena, top_arena_n=top_n,
+                  picks_note=picks_note, pool_median=round(pool_med, 1),
+                  n_gate_bad=n_gate_bad, n_picks=len(picks),
+                  signal_perf=sig_perf,
                   src='天天基金净值/季报持仓 · 腾讯ETF行情',
                   rf='板块代理=代表ETF；持仓分类按股票名称关键词，可人工核对'),
         sectors=sorted([_sector_row(s, SECS) for s in sc['sectors']],
@@ -578,8 +730,63 @@ def main():
         shortlist=[brief_all(f) for f in short_final],
     )
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    # ---- 全局价位状态（2026-11-01）：回答「今天到底有没有能买的价位」 ----
+    # 用户要的是「买到好基金 + 进到好价位」，这是两个条件。分开数，才能诚实地说
+    # 「今天没有一只同时满足」——而不是把一堆高位基金推出去让人自己去比。
+    all_out = out['picks'] + out['shortlist']
+    tstat = {'deep': 0, 'cheap': 0, 'fair': 0, 'high': 0}
+    for p in all_out:
+        tt = (p.get('adv') or {}).get('pos_tier') or 'high'
+        tstat[tt] = tstat.get(tt, 0) + 1
+    buyzone = [p for p in all_out
+               if (p.get('adv') or {}).get('pos60', 1) <= RULE['b_pos60_max']
+               and p.get('herd_gate', 0) >= 1.0]
+    cand_near = [p for p in all_out if p.get('herd_gate', 0) >= 1.0]
+    cand_near.sort(key=lambda p: (p.get('adv') or {}).get('pos60', 1))
+    near_buy = []
+    for p in cand_near[:3]:
+        adv = p.get('adv') or {}
+        line = (adv.get('tier_lines') or {}).get('fair')
+        last = (p.get('m') or {}).get('last') or 0
+        near_buy.append(dict(
+            code=p['code'], name=p['name'], score=p['score'],
+            pos60=adv.get('pos60'), line=line,
+            to_line=(round((line / last - 1) * 100, 1) if (line and last) else None)))
+    out['meta']['tier_stat'] = tstat
+    out['meta']['n_in_buyzone'] = len(buyzone)
+    out['meta']['near_buy'] = near_buy
+    print('\n价位分布: 深度便宜 %d / 便宜 %d / 合理 %d / 偏高 %d  → 可买区(≤40%% 且板块未破位) %d 只' % (
+        tstat['deep'], tstat['cheap'], tstat['fair'], tstat['high'], len(buyzone)))
+    for x in near_buy:
+        print('  最接近买点: %-22s 分数%5.1f 位置%3.0f%% 需跌 %s%% 到 %s' % (
+            x['name'][:18], x['score'], (x['pos60'] or 0) * 100,
+            x['to_line'] if x['to_line'] is not None else '—', x['line']))
+
     json.dump(out, open(OUT, 'w', encoding='utf-8'), ensure_ascii=False, separators=(',', ':'))
     print('\n-> %s  %.0f KB' % (OUT, os.path.getsize(OUT) / 1024))
+
+    # ---- 信号台账（2026-11-01 新增）：每天追加一条，滚动 260 期 ----
+    # 为什么必须留档：data.json 是覆盖式写入、只有「今天」。没有台账就无法回答
+    # 「上次推荐之后到底怎样了」，也做不了任何前向验证 —— 系统的判断力就永远无法被考核。
+    slog = os.path.join(HERE, '..', 'data', 'signal-log.json')
+    try:
+        hist = json.load(open(slog, encoding='utf-8')) if os.path.exists(slog) else []
+    except Exception:
+        hist = []
+    rec = dict(
+        date=out['meta']['data_date'], gen=out['meta']['gen'],
+        picks=[dict(code=p['code'], name=p['name'], score=p['score'], role=p.get('role'),
+                    arena=p['arena'], tier=(p.get('adv') or {}).get('pos_tier'),
+                    pos60=(p.get('adv') or {}).get('pos60'),
+                    state=(p.get('adv') or {}).get('state')) for p in out['picks']],
+        arena_top=[s['label'] for s in out['sectors'][:3]],
+        note=out['meta'].get('picks_note', ''),
+    )
+    hist = [x for x in hist if x.get('date') != rec['date']] + [rec]
+    hist = sorted(hist, key=lambda x: x.get('date') or '')[-260:]
+    json.dump(hist, open(slog, 'w', encoding='utf-8'), ensure_ascii=False, separators=(',', ':'))
+    print('-> signal-log.json  %d 期（%s ~ %s）' % (
+        len(hist), hist[0].get('date', '-') if hist else '-', hist[-1].get('date', '-') if hist else '-'))
 
 
 if __name__ == '__main__':
