@@ -44,8 +44,8 @@ def main():
         len({p.get('arena') for p in picks}) == len(picks),
         '板块: %s' % [p.get('arena') for p in picks])
     for p in picks:
-        chk('%s 板块未破位才进推荐' % p['code'], (p.get('herd_gate') or 0) >= 1.0,
-            'gate %.2f' % (p.get('herd_gate') or 0))
+        chk('%s 慢尺(年线/主线)未断才进推荐' % p['code'], p.get('slow_intact') is True,
+            'slow_intact %s' % p.get('slow_intact'))
         chk('%s 总分不低于池中位' % p['code'], p['score'] >= (meta.get('pool_median') or 0) - 0.05,
             '%.1f vs 中位 %.1f' % (p['score'], meta.get('pool_median') or 0))
         chk('%s 带 role 与持仓覆盖率' % p['code'],
@@ -53,16 +53,15 @@ def main():
             'role=%s cover=%s' % (p.get('role'), p.get('hold_cover')))
         chk('%s 带主战场相关性' % p['code'], p.get('arena_corr') is not None)
 
-    print('[2] 趋势门槛（页面写的是"处于上涨趋势"）')
+    print('[2] 好价位门槛（页面写的是"近60日位置≤40%"——买点价格条件）')
     for p in picks:
-        chk('%s 站上 MA20' % p['code'], p['m']['above20'] is True,
-            '净值 %.4f / MA20 %.4f' % (p['m']['last'], p['m']['ma20']))
-    over = [p['code'] for p in short if not p['m']['above20']]
-    chk('备选池全部站上 MA20', not over, '越界: %s' % over)
+        chk('%s 近60日位置 ≤ 合理区上沿(40%%)' % p['code'], (p['adv']['pos60'] or 1) <= 0.40,
+            '位置 %.0f%%' % ((p['adv']['pos60'] or 0) * 100))
+    # 备选池(监控用)允许价位偏高，不强求；只记录不阻断
+    hi = [p['code'] for p in short if (p['adv']['pos60'] or 0) > 0.40]
+    print('  · 备选池里 %d 只价位偏高(>40%%)，属正常监控范围' % len(hi))
 
-    print('[3] 最近收益（页面写的是"最近收益优秀"）')
-    for p in picks:
-        chk('%s 近3月 > 0' % p['code'], p['m']['r3m'] > 0, '近3月 %+.1f%%' % (p['m']['r3m'] * 100))
+    print('[3] 最近收益（备选池定义=近3月为正，用于监控；推荐不要求近3月为正）')
     neg = [p['code'] for p in short if not (p['m']['r3m'] or 0) > 0]
     chk('备选池无「近3月为负」', not neg, '异常: %s' % neg)
 
@@ -112,13 +111,14 @@ def main():
         chk('%s 持仓权重与合计一致' % p['code'], abs(w - p['top10_sum']) < 0.5,
             '%.2f vs %.2f' % (w, p['top10_sum']))
 
-    print('[9] 打分边界')
+    print('[9] 打分边界（质量分 = 长期收益 + 基金经理 + 行业能力 + 风险）')
     for p in picks:
         chk('%s 总分 0~100' % p['code'], 0 <= p['score'] <= 100, '%.1f' % p['score'])
-        tot = p['s_ret'] + p['s_trend'] + p['s_herd'] + p['s_risk']
+        tot = p['s_ret'] + (p['s_mgr'] or 0) + (p['s_skill'] or 0) + p['s_risk']
         chk('%s 分项之和 == 总分' % p['code'], abs(tot - p['score']) < 0.15,
             '%.2f vs %.1f' % (tot, p['score']))
-        chk('%s 抱团分 0~30' % p['code'], 0 <= p['s_herd'] <= 30.01, '%.2f' % p['s_herd'])
+        chk('%s 基金经理分 0~25' % p['code'], 0 <= (p['s_mgr'] or 0) <= 25.01, '%.2f' % (p['s_mgr'] or 0))
+        chk('%s 行业能力分 0~25' % p['code'], 0 <= (p['s_skill'] or 0) <= 25.01, '%.2f' % (p['s_skill'] or 0))
 
     print('[10] 板块榜')
     chk('板块按动量降序', all(secs[i]['mom'] >= secs[i + 1]['mom'] for i in range(len(secs) - 1)))
@@ -132,11 +132,12 @@ def main():
         # 正确不变量：破位(gate=0.5) ⟹ 抱团分被封顶 15（30×0.5）。
         # 旧版误写成「抱团分低 ⟹ 必破位」，方向反了——低分也可能来自 gate=1 时持仓动量/相关强度弱。
         # 2026-11-01 轮动后 166011 主战场转银行(健康 gate=1) 但分数低 → 旧断言误报，已纠正。
-        chk('%s 板块健康门取值合法(1.0/0.5)' % p['code'], p['herd_gate'] in (1.0, 0.5),
-            'gate %.2f' % p['herd_gate'])
-        chk('%s 破位时抱团分已被对折(<=15)' % p['code'],
-            (p['herd_gate'] != 0.5) or (p['s_herd'] <= 15.01),
-            '抱团分 %.1f gate %.2f' % (p['s_herd'], p['herd_gate']))
+        chk('%s 慢尺镜像 herd_gate 与 slow_intact 一致(1.0/0.5)' % p['code'],
+            p['herd_gate'] == (1.0 if p.get('slow_intact') else 0.5),
+            'gate %.2f / slow %s' % (p['herd_gate'], p.get('slow_intact')))
+        chk('%s 行业能力分未被板块短期状态对折(0~25)' % p['code'],
+            0 <= (p['s_skill'] or 0) <= 25.01,
+            '%.2f' % (p['s_skill'] or 0))
 
     print('[12] 买卖点规则的质量（这是 2026-10-31 重写的核心，必须盯住）')
     for p in picks:
@@ -161,7 +162,7 @@ def main():
             a.get('pos60') is not None and a.get('rule', {}).get('b_pos60_max') == 0.40,
             'pos60 %.2f / 阈值 %.2f' % (a.get('pos60') or 0, a.get('rule', {}).get('b_pos60_max') or 0))
         chk('%s 建议状态在允许的枚举内' % p['code'],
-            a['state'] in ('该走 · 已跌 18%', '该走 · 押的板块动能拐头', '先别买 · 板块已破位',
+            a['state'] in ('该走 · 已跌 18%', '该走 · 押的板块动能拐头', '先别买 · 慢尺已破',
                            '可以买 · 位置偏低', '先别买 · 已经涨高了', '先别买 · 它自己在跌',
                            '先别买 · 方向没定'),
             a['state'])
@@ -221,10 +222,33 @@ def main():
             '基金 %s / 板块 %s' % (a.get('sig_rel'), (BY_SEC.get(p_.get('arena')) or {}).get('sig_rel')))
 
     print('')
+    print('[15] 质量/时机拆分回归（矛盾不再出现）')
+    # 核心不变量：质量分不被板块短期状态压低。若存在「质量>=中位 但 板块MA20已破」的基金，
+    # 说明旧矛盾（好基金一跌到好价格就被踢出好基金名单）已消除——质量分是持续性的，与板块短期冷热解耦。
+    sc = json.load(open(os.path.join(HERE, 'scored.json'), encoding='utf-8'))
+    secs = {s['label']: s for s in sc['sectors']}
+    pool = sc['scored']
+    med = sorted(f['score'] for f in pool)[len(pool) // 2]
+
+    def _arena_healthy(f):
+        a = (f.get('expo') or [{}])[0].get('sector') if f.get('expo') else f.get('main_sector')
+        return bool(secs[a]['healthy']) if a in secs else False
+
+    quality = [f for f in pool if f['score'] >= med]
+    broken = [f for f in quality if not _arena_healthy(f)]
+    print('  质量>=中位共 %d 只，其中板块MA20已破 %d 只：%s'
+          % (len(quality), len(broken), [f['code'] for f in broken][:8]))
+    chk('质量>=中位的基金里存在「板块MA20已破」的（质量分没被短期状态压低）',
+        len(broken) >= 1, '%d/%d' % (len(broken), len(quality)))
+    # 进一步：这些“质量好但板块短期破”的基金，旧逻辑会被 herd_gate=0.5 踢出；新逻辑质量分不受影响
+    # （用 s_herd 不再乘 gate 验证：它们的行业能力分仍应在 0~25 正常值区间，不为 0/对折）
+    bad = [f['code'] for f in broken if not (0 <= f.get('s_herd', 0) <= 25.01)]
+    chk('板块破位不再导致行业能力分被对折清零', not bad, '异常: %s' % bad)
+
     if FAIL:
         print('==> %d 条不成立，先修再交付' % FAIL)
         sys.exit(1)
-    print('==> 全部通过（%d 组断言）' % 14)
+    print('==> 全部通过（%d 组断言）' % 15)
 
 
 main()

@@ -2,12 +2,12 @@
 """
 06 · 定榜：持仓为主的抱团分 + 三只推荐 + 买卖点
 ------------------------------------------------------------
-抱团分（30 分）口径（这是本系统最核心的判断，写清楚以便被推翻）：
-   持仓加权板块动量 = Σ(前十大权重占比 × 该行业代表ETF的动量百分位)
-   抱团分 = 30 × (0.60 × 持仓加权动量 + 0.40 × 相关强度) × 板块健康门
+行业能力（25 分，属「质量分」四因子之一，在 04_score.py 计算；本文件只做时机判定与定榜）：
+   行业能力 = 25 × clamp((净值与「押的那个板块(arena)」60日相关性 - 0.40) / 0.40, 0, 1)
      · 相关强度 = clamp((净值与「押的那个板块」60日相关性 - 0.55) / 0.40, 0, 1)
-     · 板块健康门：「押的那个板块」ETF 跌破 MA20 → ×0.5（抱团已瓦解，不算踩中）
    若该基金拿不到持仓，退回用相关性最高板块代替（页面上标注「按净值推断」）
+   ★ 注意：原「板块健康门（跌破 MA20 → ×0.5）」已删除——短期板块状态不再进质量分，
+     改由「慢尺（年线/主线）未断」在时机层单独判定（见下「推荐规则」）。
 
 ★★ 2026-11-01 口径修正（9D_audit.py 量出来的）：
    原来「押的板块」有两个定义并存 —— 页面文案用 arena（持仓第一大行业），
@@ -25,14 +25,14 @@
   实测：中航趋势领航等基金重仓的是「汽零转型机器人」小票（福赛/斯菱/新泉），
   与中证机器人指数（汇川/埃斯顿）成分差别很大 → 这类基金的抱团分被系统性低估。
 
-推荐规则（2026-11-01 重写）：质量优先 + 同注去重，**宁缺毋滥**。
-   ① 候选池先剔掉「板块已破位」的（herd_gate < 1）——破位的板块不算抱团，不该进推荐
-   ② 前两只：按总分降序，同注去重（90 日相关性 >= 0.75 视为同一个赌注，只留最优那只）
-   ③ 第三只（分散位）：方向（arena）与已选不同 + 近3月为正 + 与已选相关性 < 0.60 + 总分 >= 池中位
-   ④ 满足不了就只给 2 只，并在 picks_note 里写明原因，不硬凑
-   ★ 为什么加 ①②：2026-10-30 那版第 3 只 166011 只有 50.6 分、板块已破位、
-     而备选池里有 84.9 分的 ——「优中选优」里出现一只破位低分基金，是呈现层的硬伤。
-   ★ 每只都带 role：'front'（分数入选）/ 'spread'（分散入选），并给出
+推荐规则（2026-11-01 重写 / 同日晚修正质量-时机拆分）：质量优先 + 好价位 + 慢尺未断，宁缺毋滥。
+   ① 买点三条件：质量分>=池中位（好基金） + pos60<=合理区上沿（好价位） + slow_intact（慢尺/年线/主线未断）。
+      ★ 修正点：不再用「板块跌破 MA20」卡候选——好基金短期回踩(板块破MA20但年线仍在)仍是好基金，
+        跌到便宜区就是买点，彻底消除“好基金一跌到好价格就不是好基金”的矛盾。
+   ② 同注去重按「板块」判：同一 arena 只取分数最高的一只（用户原话：两只都押银行就选最优）。
+   ③ 再加相关性闸：不同板块但 90 日走势雷同(>=0.75)仍算同一个赌注。
+   ④ 满足不了 3 只就如实给更少，并在 picks_note 里写明挡住了多少只、因为什么。
+   ★ 每只都带 role：'best'（质量第一）/ 'spread'（分散位），并给出
      score_gap_best（比第 1 名低多少分），让「为了分散付出的代价」可见。
 输出：数据/data.json
 """
@@ -101,6 +101,7 @@ def load_sec_state():
         ds = [x[0] for x in s['k']]
         vs = [x[1] for x in s['k']]
         m60 = ma(vs, 60)
+        m120 = ma(vs, 120)   # ★ 慢尺：板块年线（主线是否还在长期上行）
         mom20 = {}
         for i in range(20, len(vs)):
             mom20[ds[i]] = vs[i] / vs[i - 20] - 1
@@ -118,6 +119,7 @@ def load_sec_state():
                 continue
             st[d] = dict(
                 above60=vs[i] > m60[i],
+                above120=(m120[i] is not None and vs[i] > m120[i]),
                 m60_dn=m60[i] < m60[i - 20],
                 dd120=vs[i] / max(vs[max(0, i - 119):i + 1]) - 1,
                 mom_rk=rk.get(d),
@@ -165,7 +167,7 @@ def marks(series, arena='', SECS=None, cap=40):
        买 B —— 低位 + 趋势在 + 板块没坏（三条件全满足，冷却 20 日）
          ① pos60 <= 0.40      净值在过去 60 日区间的下 40% 分位（这是「不追高」的硬约束）
          ② MA20 > MA60 且 MA60 高于 20 日前（趋势向上）
-         ③ 主战场 ETF 收盘 > 其 MA60（板块没破位）
+         ③ 慢尺（年线/主线）未断：基金自身年线(MA250)或退一步板块 MA120 还在（板块短期破 MA20/MA60 不算破）
        实测：B 位置中位 0.35（旧规则 0.75），后 20 日收益训练段 +0.37% / 验证段 +2.57%，两段一致。
 
        卖 S —— 抱团动量拐头（冷却 20 日），另加一条硬止损
@@ -188,6 +190,7 @@ def marks(series, arena='', SECS=None, cap=40):
         pos60 = (vs[i] - lo) / (hi - lo) if hi > lo else 0.5
         dd120 = vs[i] / max(vs[max(0, i - 119):i + 1]) - 1
         s3 = sec_at(SECS, arena, ds[i]) if SECS else None
+        sec_ok = slow_scale_series(vs[:i + 1], arena, ds[i], SECS)[0] if SECS else True
 
         if holding:
             why = ''
@@ -210,7 +213,6 @@ def marks(series, arena='', SECS=None, cap=40):
                 holding, last_i = 0, i
         else:
             trend_up = m20[i] > m60[i] and m60[i] > m60[i - 20]
-            sec_ok = bool(s3['above60']) if s3 else True
             if (trend_up and pos60 <= RULE['b_pos60_max'] and sec_ok
                     and i - last_i >= RULE['b_cool']):
                 out.append(dict(d=ds[i], v=round(vs[i], 4), t='B',
@@ -229,6 +231,61 @@ def cur_pos(series):
     pos60 = (vs[-1] - lo) / (hi - lo) if hi > lo else 0.5
     dd120 = vs[-1] / max(vs[-120:]) - 1
     return round(pos60, 2), round(dd120, 3)
+
+
+def slow_scale_series(vs, arena, date, SECS):
+    """慢尺（年线 / 主线）是否未断 —— 时机判定的长期护栏（接收序列，供 marks/advice 复用）。
+
+    设计目标：解决「好基金一跌到好价格就从好基金名单消失」的矛盾。
+    旧护栏用板块 MA20（太灵敏，一个短期回踩就破 → 质量分被对折、推荐被踢）。
+    新护栏用「慢尺」：
+      · 优先看基金自己的年线（MA250）：长期上行趋势还在，短期回踩 60 日低位也仍算“主线未断”；
+      · 历史不足 250 日 → 回退到基金 MA120；
+      · 再不足（<120 日）→ 看它押的板块 ETF 是否在 MA120（板块主线）上方；
+      · 都无数据 → 不硬拦（fail-open）。
+    返回值 (intact: bool, label: str, which: str)。
+    """
+    n = len(vs)
+    fund_ok = None
+    which = ''
+    if n >= 250:
+        m = ma(vs, 250)
+        if m[-1] is not None:
+            fund_ok = vs[-1] > m[-1]
+            which = '年线(MA250)'
+    elif n >= 120:
+        m = ma(vs, 120)
+        if m[-1] is not None:
+            fund_ok = vs[-1] > m[-1]
+            which = 'MA120'
+    if fund_ok is not None:
+        return bool(fund_ok), ('%s未断' % which if fund_ok else '%s已破' % which), which
+    # 基金历史太短，用板块主线兜底
+    if SECS and arena in SECS:
+        st = sec_at(SECS, arena, date)
+        if st and st.get('above120') is not None:
+            return bool(st['above120']), ('板块主线(MA120)%s' % ('未断' if st['above120'] else '已破')), '板块MA120'
+    return True, '慢尺数据不足(不拦)', 'none'
+
+
+def slow_scale(f, SECS):
+    """基金 dict 版封装（供 main 调用）"""
+    vs = [x[1] for x in f['series']]
+    return slow_scale_series(vs, f.get('arena', ''), f['m']['last_date'], SECS)
+
+
+def sector_turned(arena, series, SECS):
+    """板块动能拐头：板块动能分位曾 >0.85，且当前 <0.55 —— 长期主线转弱，是「该走」的一类触发。"""
+    if not SECS or not arena:
+        return False
+    s3 = sec_at(SECS, arena, series[-1][0])
+    rk = s3.get('mom_rk') if s3 else None
+    past = [q['mom_rk'] for q in
+            (sec_at(SECS, arena, d) for d in [x[0] for x in series][-RULE['s_look']:])
+            if q and q.get('mom_rk') is not None]
+    rank_max40 = max(past) if past else None
+    return bool(rk is not None and rk < RULE['s_rank_lo']
+                and rank_max40 is not None and rank_max40 > RULE['s_rank_hi'])
 
 
 def advice(f, SECS=None):
@@ -272,7 +329,9 @@ def advice(f, SECS=None):
                     '低于「随便哪天买」的 +1.63% —— 涨高了再买，统计上是负超额，这就是规则不给买点的原因。')
     stop = round(a60, 4)          # 60 日均线。它只是买点的趋势条件，**不是卖出信号**
     trend_up = a20 > a60 and not a60_dn
-    sec_ok = bool(s3['above60']) if s3 else True
+    # ★ 慢尺（年线/主线）判定：板块短期跌破 MA20/MA60 不算破，长期主线(年线/MA120)还在就是没断
+    sec_ok = slow_scale(f, SECS)[0] if SECS else True
+    slow_label = slow_scale(f, SECS)[1] if SECS else ''
 
     # ---------------- 信号板：规则里只有 3 个信号，逐条给当前值 / 是否满足 / 差多少 ----------------
     # 这是页面「明确操作信号」的唯一来源。文字结论必须由它推出，不能另写一套。
@@ -287,28 +346,26 @@ def advice(f, SECS=None):
             rank_max40 = max(past)
 
     trend_ok = bool(a20 > a60 and not a60_dn)
-    s1_ok = dd120 <= RULE['s_dd120']
-    s2_ok = bool(rk is not None and rk < RULE['s_rank_lo']
-                 and rank_max40 is not None and rank_max40 > RULE['s_rank_hi'])
-    b_ok = bool(trend_ok and pos60 <= RULE['b_pos60_max'] and sec_ok)
+    s2_ok = sector_turned(arena, f['series'], SECS)
+    b_ok = bool(sec_ok and pos60 <= RULE['b_pos60_max'])
 
     sig = [
         dict(k='B', label='买入信号', hit=b_ok, rows=[
             dict(t='近 60 日位置 ≤ 40%',
                  now='%.0f%%' % (pos60 * 100), ok=pos60 <= RULE['b_pos60_max'],
                  need='要跌到 %.4f（%+.1f%%）' % (buy_line, (buy_line / c - 1) * 100)),
-            dict(t='20 日均线在 60 日均线上方，且 60 日均线在上行',
-                 now='%.4f %s %.4f，%s' % (a20, '>' if a20 > a60 else '<', a60,
-                                          '上行' if not a60_dn else '下行'), ok=trend_ok, need=''),
-            dict(t='押的板块 ETF 没跌破 60 日均线',
-                 now=(arena + ('：站上' if sec_ok else '：已跌破')) if s3 else '无板块数据',
+            dict(t='慢尺(年线/主线)未断',
+                 now=(arena + ('：' + slow_label) if s3 else '无板块数据'),
                  ok=sec_ok, need=''),
-        ], n_bad=sum(1 for x in (pos60 <= RULE['b_pos60_max'], trend_ok, sec_ok) if not x)),
-        dict(k='S1', label='卖出信号 · 硬止损', hit=s1_ok, rows=[
-            dict(t='距 120 日最高点回撤 ≥ 18%',
-                 now='%.1f%%' % (dd120 * 100), ok=s1_ok,
-                 need='要跌到 %.4f（%+.1f%%）' % (stop_price, (stop_price / c - 1) * 100)),
-        ], n_bad=0 if s1_ok else 1),
+            dict(t='短期走势（参考，非硬约束）',
+                 now='20日%.4f %s 60日%.4f，%s' % (a20, '>' if a20 > a60 else '<', a60,
+                                                 '上行' if not a60_dn else '下行'), ok=trend_ok, need=''),
+        ], n_bad=sum(1 for x in (pos60 <= RULE['b_pos60_max'], sec_ok) if not x)),
+        dict(k='S1', label='卖出信号 · 长期趋势破位', hit=(not sec_ok), rows=[
+            dict(t='长期趋势(年线/主线)未破',
+                 now=(arena + ('：' + slow_label) if s3 else '无板块数据'),
+                 ok=sec_ok, need=''),
+        ], n_bad=0 if sec_ok else 1),
         dict(k='S2', label='卖出信号 · 板块动能拐头', hit=s2_ok, rows=[
             dict(t='板块动能现在 < 0.55',
                  now=('%.2f' % rk) if rk is not None else '无数据',
@@ -334,12 +391,16 @@ def advice(f, SECS=None):
                 x['verdict'] = '不会触发：这个板块动能最高只到过 %.2f，没到过 0.85' % rank_max40
             else:
                 x['verdict'] = '未触发（动能还在高位，没拐头）'
+        elif x['k'] == 'S1':
+            x['verdict'] = '未触发（长期趋势未破）'
         else:
             x['verdict'] = '未触发（还差 %.1f 个百分点）' % abs(dd120 * 100 - RULE['s_dd120'] * 100)
     # 下一个会触发的信号 + 触发价，让「等什么」变成具体数字
     nxt = None
-    if not s1_ok:
-        nxt = dict(k='S1', what='硬止损', price=stop_price, gap=(stop_price / c - 1) * 100)
+    ma250 = ma(vs, 250)
+    if ma250 and ma250[-1] is not None and sec_ok:
+        tl = round(ma250[-1], 4)
+        nxt = dict(k='S1', what='长期趋势破位(跌破年线MA250)', price=tl, gap=(tl / c - 1) * 100)
     if not b_ok and pos60 > RULE['b_pos60_max']:
         cand = dict(k='B', what='买入', price=buy_line, gap=(buy_line / c - 1) * 100)
         if nxt is None or abs(cand['gap']) < abs(nxt['gap']):
@@ -349,32 +410,27 @@ def advice(f, SECS=None):
     # 文案铁律：系统不知道你有没有持仓，所以每条都说清「已经买了的」「还没买的」各自怎么办，
     # 绝不出现「只能持有」「别加仓」这种替用户决定仓位的说法。
     # 卖出信号的真实口径（页面文案不得超出这两条，绝不能编「跌破均线就卖」）
-    s_line = ('按规则，卖出只有两条：距 120 日最高点回撤 18%%（对应净值 %.4f）、或它押的板块动能拐头。'
-              % stop_price)
+    s_line = ('按规则，卖出信号只有两类：长期趋势（年线/主线）破位，或它押的板块动能拐头（板块主线转弱）。'
+              '单看「从高点回撤了多少百分比」不算卖出信号——跌多了可能只是上涨途中的回调，会随机反弹。')
 
-    if dd120 <= RULE['s_dd120']:
-        state, tone = '该走 · 已跌 18%', 'bad'
-        act = ('这只基金从最近 120 个交易日的最高点已经跌了 %.1f%%，触发 18%% 硬止损 —— 这是规则里两条卖出信号之一，'
-               '已经成立。已经买了的：按规则卖出，别在下跌里抢反弹。'
-               '还没买的：跌得多不等于便宜，现在不碰。' % (abs(dd120) * 100))
+    if not sec_ok:
+        state, tone = '该走 · 长期趋势破位', 'bad'
+        act = ('它押的「%s」板块，长期主线（年线/MA120）已经破了（%s）。这才是真正的「该走」信号——'
+               '长期上涨趋势破了，后面大概率是下跌或震荡，不是短暂回调。'
+               '已经买了的：按纪律减仓/离场，别在破位下跌里扛。'
+               '还没买的：长期趋势坏了，短期跌再多也不算买点。' % (arena, slow_label))
     elif s2_ok:
         state, tone = '该走 · 押的板块动能拐头', 'bad'
         act = ('它主要押的是「%s」板块。这个板块的动能分位从近 40 日内的最高 %.2f 掉到 %.2f，'
-               '触发「板块动能拐头」—— 这是规则里两条卖出信号之一，已经成立。'
-               '已经买了的：按规则卖出，别等它跌透。还没买的：现在不是进场的时候。'
+               '触发「板块动能拐头」—— 长期主线转弱，后面大概率是下跌或震荡。'
+               '已经买了的：按纪律减仓/离场。还没买的：现在不是进场的时候。'
                % (arena, rank_max40 or 0, rk))
-    elif not sec_ok:
-        state, tone = '先别买 · 板块已破位', 'warn'
-        act = ('它押的「%s」板块，代表 ETF 已经跌破 60 日均线。买入信号要求「板块没破位」，'
-               '这一条不满足，所以现在不给买点（跟这只基金自己涨不涨无关）。'
-               '已经买了的：%s 都没触发，规则上没有卖出动作。'
-               '还没买的：等这个板块重新站上 60 日均线再考虑。' % (arena, s_line))
-    elif trend_up and pos60 <= RULE['b_pos60_max']:
+    elif sec_ok and pos60 <= RULE['b_pos60_max']:
         state, tone = '可以买 · 位置偏低', 'ok'
-        act = ('三个条件同时满足：价格在近 60 个交易日区间的 %.0f%% 位置（0%% 是最低、100%% 是最高，规则要求 ≤%.0f%%）、'
-               '基金自己的走势向上、它押的板块也没破位。这是买点。'
+        act = ('三个条件同时满足：长期趋势未破（%s）、价格在近 60 个交易日区间的 %.0f%% 位置（规则要求 ≤%.0f%%）、'
+               '质量分够格。这是买点——注意是「长期趋势 intact 下的低位」，短期还在不在探底不影响这个判断。'
                '买进去之后，%s 注意 60 日均线（%s）不是卖出线，它只是买点的趋势条件。'
-               % (pos60 * 100, RULE['b_pos60_max'] * 100, s_line, stop))
+               % (slow_label, pos60 * 100, RULE['b_pos60_max'] * 100, s_line, stop))
     elif trend_up:
         state, tone = '先别买 · 已经涨高了', 'ok'
         act = ('走势向上，但价格已经在近 60 日区间的 %.0f%% 位置，买入信号要求的「位置 ≤%.0f%%」这条不满足 —— 现在不是买点。'
@@ -385,15 +441,19 @@ def advice(f, SECS=None):
     elif c < a60 and a60_dn:
         state, tone = '先别买 · 它自己在跌', 'bad'
         act = ('这只基金「自己」的净值在 60 日均线（%s）下方，而且这条均线本身还在往下走。'
-               '买入信号要求「20 日均线在 60 日均线上方且 60 日均线上行」，这条不成立。'
-               '注意：这里说的是「基金自己」，跟它押的板块是两回事。'
+               '买入信号要求「长期趋势未破 + 位置低」，长期趋势这一条不成立。'
                '已经买了的：%s 都没触发，规则上不卖出，但也不会在这里加。'
-               '还没买的：等它自己站回 60 日均线上方。' % (stop, s_line))
+               '还没买的：等它自己站回长期主线。' % (stop, s_line))
     else:
         state, tone = '先别买 · 方向没定', 'warn'
-        act = ('基金自己的走势还没转强（20 日均线 %s 还没上穿 60 日均线 %s），也没触发 18%% 硬止损。'
+        act = ('基金自己的走势还没转强（20 日均线 %s 还没上穿 60 日均线 %s），长期趋势也未确认向上。'
                '买入信号和卖出信号都不成立。已经买了的：%s 都没触发，规则上没有动作。'
                '还没买的：先不动，等方向出来。' % (round(a20, 4), stop, s_line))
+    # 18% 回撤不再是「该走」触发条件：跌多了可能只是上涨途中的回调，会随机反弹。
+    # 只有当长期趋势(年线/主线)也破了，才算真该走。这里如实告知回撤幅度，但不作为卖出信号。
+    if dd120 <= RULE['s_dd120'] and sec_ok:
+        act += (' 另注：它从 120 日高点已回撤 %.1f%%，但长期趋势(年线/主线)未破，属上涨途中的回调，'
+                '不是破位，不触发卖出；真要离场得等长期趋势破。' % (abs(dd120) * 100))
 
     # ★ 价位结论必须跟着一起说：state 讲的是「趋势+板块」是否确认，tier 讲的是「贵不贵」，
     #   两者可以不一致（深度便宜区里趋势往往还没转好）。不补这句，用户会觉得自相矛盾。
@@ -406,6 +466,7 @@ def advice(f, SECS=None):
                 buy_line=buy_line, buy_lo=round(lo60, 4), buy_hi=round(hi60, 4),
                 stop=stop, trigger_up=round(a20, 4), pos60=pos60, dd120=dd120,
                 sec_ok=sec_ok, mom_rk=(round(rk, 2) if rk is not None else None),
+                slow_label=slow_label,
                 a60_dn=a60_dn, trend_up=trend_up, rule=RULE,
                 sig=sig, next=nxt, stop_price=stop_price, hi120=round(hi120, 4),
                 pos_tier=tier, pos_tier_name=tier_name, pos_tier_tone=tier_tone,
@@ -558,15 +619,28 @@ def main():
             f['align'] = 'split'
         f['arena_weak'] = bool(a_corr is not None and a_corr < 0.50)
 
-        strength = clamp((a_corr - 0.55) / 0.40)
-        base = 0.60 * f['hold_mom'] + 0.40 * strength
-        gate = 1.0 if a_healthy else 0.5
-        f['s_herd'] = round(30 * base * gate, 2)
-        f['herd_gate'] = gate
-        f['score'] = round(f['s_ret'] + f['s_trend'] + f['s_herd'] + f['s_risk'], 1)
+        # s_herd 字段在 04 已算好（= 行业能力分），这里不再重算、也不乘板块健康门。
+        # ★ 注意：质量分 f['score'] 由 04_score 统一定义（长期收益+经理+行业能力+风险），
+        #   不在 06 重算——否则又会把质量分与短期板块状态绑死（旧矛盾根源）。
+        #   f['herd_gate'] 在 main 末尾按「慢尺(年线/主线)状态」统一重设，这里不写。
         f['_inferred'] = inferred_from_nav
 
     pool.sort(key=lambda x: -x['score'])
+
+    # ---- 每个基金的「慢尺状态」与「当前价位分位」（时机判定，不进质量分）----
+    # ★ 关键修正：质量分已不含任何瞬时板块状态；这里单独算时机护栏。
+    #   slow_intact=True 表示「年线/主线未断」——好基金短期回踩(板块跌破MA20但年线仍在)仍是好基金。
+    #   herd_gate 改为慢尺状态镜像(1.0/0.5)，仅用于前端 chip 与自检兼容。
+    for f in pool:
+        p60, _ = cur_pos(f['series'])
+        f['pos60'] = p60
+        intact, slow_label, slow_which = slow_scale(f, SECS)
+        f['slow_intact'] = intact
+        f['slow_label'] = slow_label
+        f['slow_which'] = slow_which
+        f['herd_gate'] = 1.0 if intact else 0.5
+        # ★ 该走互斥：长期趋势(年线/主线)已破，或板块动能拐头 → 绝不进推荐位（避免“让被套”）
+        f['is_exit'] = (not intact) or sector_turned(f.get('arena', ''), f['series'], SECS)
 
     # ---- 相关系数矩阵（90 日）----
     def rmap(f):
@@ -586,18 +660,24 @@ def main():
         syy = sum((y[i] - my) ** 2 for i in range(n))
         return sxy / math.sqrt(sxx * syy) if sxx > 0 and syy > 0 else 0.0
 
-    # ---- 推荐：质量优先 + 同注去重，宁缺毋滥 ----
-    # ① 硬门槛一：板块未破位（herd_gate >= 1）。破位的板块不算抱团，不该进推荐。
-    # ② 硬门槛二：总分 >= 池中位。破位之外，也不许拿低分基金凑数。
-    # ③ ★同注去重按「板块」判（2026-11-01 修正）：同一 arena 只取分数最高的一只。
-    #    ——README 一直写的是「同一板块只取一只」，但代码此前按 90 日相关性 <0.75 去重，
-    #      于是「两只都押银行」只要相关性不到 0.75 就都会入选，等于同一注下两次。
-    #      用户原话：「两只基都是银行，他就会选最优的。」现在按这个来。
-    # ④ 再加一道相关性闸：不同板块但走势雷同（>=0.75）仍算同一个赌注。
-    # ⑤ 凑不满 3 只就如实给更少，并在 picks_note 里写明挡住了什么。
+    # ---- 推荐：质量优先 + 好价位 + 慢尺未断，宁缺毋滥 ----
+    # ★ 2026-11-01 修正（解决“好基金跌到好价格就不是好基金”的矛盾）：
+    #   买点 = 质量基金(质量分>=池中位) + 好价位(pos60<=合理区上沿) + 慢尺未断(年线/主线还在)。
+    #   质量分本身已不随短期涨跌掉档；这里的门槛只卡“时机”，卡的是“慢尺”而非“板块MA20”。
+    #   所以：好基金短期回踩、板块跌破MA20但年线仍在 → 质量分不掉、慢尺未断、跌到便宜区照样进推荐。
+    # ① 慢尺未断（slow_intact）：年线/主线还在，长期趋势没坏。
+    # ② 好价位：pos60 <= 合理区上沿(40%)，即“不追高”的硬约束。
+    # ③ 质量门槛：质量分 >= 池中位，不拿低分基金凑数。
+    # ④ 同注去重按「板块」判（2026-11-01 修正）：同一 arena 只取分数最高的一只。
+    # ⑤ 再加一道相关性闸：不同板块但走势雷同（>=0.75）仍算同一个赌注。
+    # ⑥ 凑不满 3 只就如实给更少，并在 picks_note 里写明挡住了什么。
     scores_sorted = sorted(f['score'] for f in pool)
-    pool_med = scores_sorted[len(pool) // 2] if scores_sorted else 0
-    qual = [f for f in pool if f['herd_gate'] >= 1.0 and f['score'] >= pool_med]
+    quality_med = scores_sorted[len(pool) // 2] if scores_sorted else 0
+    qual = [f for f in pool
+            if f['slow_intact']
+            and f['pos60'] <= RULE['pos_tier_fair']
+            and f['score'] >= quality_med
+            and not f.get('is_exit')]
     picks = []
     used_arena = set()
     for f in qual:
@@ -617,21 +697,31 @@ def main():
         f['role'] = 'best' if i == 0 else 'spread'
         f['score_gap_best'] = round(best_score - f['score'], 1)
         f['rank_in_pool'] = rank_of.get(f['code'])
-    n_gate_bad = sum(1 for f in pool if f['herd_gate'] < 1.0)
+    n_slow_bad = sum(1 for f in pool if not f['slow_intact'])
+    n_price_bad = sum(1 for f in pool if f['pos60'] > RULE['pos_tier_fair'])
+    n_lowq = sum(1 for f in pool if f['score'] < quality_med)
+    n_exit = sum(1 for f in pool if f.get('is_exit'))
     n_same_arena = sum(1 for f in qual
                        if f['code'] not in picked_codes and f['arena'] in used_arena)
     if len(picks) >= 3:
         picks_note = ''
     else:
         bits = []
-        if n_gate_bad:
-            bits.append('%d 只的板块已破位（不算抱团）' % n_gate_bad)
+        if n_exit:
+            bits.append('%d 只长期趋势已破(该走)，不推' % n_exit)
+        if n_slow_bad:
+            bits.append('%d 只慢尺(年线/主线)已破，时机未到' % n_slow_bad)
+        if n_price_bad:
+            bits.append('%d 只价位偏高(>合理区)，等回调' % n_price_bad)
+        if n_lowq:
+            bits.append('%d 只质量分低于池中位' % n_lowq)
         if n_same_arena:
             bits.append('%d 只同样押「%s」已按同注去重只留最优' % (
                 n_same_arena, '、'.join(sorted(used_arena))))
         picks_note = ('今天只给 %d 只：%d 只候选里 %s。'
-                      '按「同一板块只取最优、宁缺毋滥」，不为了凑满 3 只去推一只破位、'
-                      '或者押同一个板块的基金。' % (len(picks), len(pool), '；'.join(bits)))
+                      '按「质量优先 + 好价位 + 慢尺未断 + 同注去重、宁缺毋滥」，'
+                      '不为了凑满 3 只去推一只时机未到、或押同一个板块的基金。'
+                      % (len(picks), len(pool), '；'.join(bits)))
     for f in picks:
         f['corr_with'] = [dict(code=p['code'], name=p['name'], corr=round(pcorr(f['code'], p['code']), 2))
                           for p in picks if p is not f]
@@ -649,7 +739,9 @@ def main():
         u = uni.get(f['code'], {})
         return dict(
             code=f['code'], name=f['name'], score=f['score'],
-            s_ret=f['s_ret'], s_trend=f['s_trend'], s_herd=f['s_herd'], s_risk=f['s_risk'],
+            s_ret=f['s_ret'], s_trend=f['s_trend'], s_herd=f['s_herd'],
+            s_skill=f.get('s_skill'), s_mgr=f.get('mgr_score'), s_risk=f['s_risk'],
+            mgr_q=f.get('mgr_q'), mgr_sum=f.get('mgr_sum'),
             m=f['m'], scale=f['scale'], scale_prev=f['scale_prev'],
             scale_trend=f['scale_trend'], scale_date=f['scale_date'],
             mgr=f['mgr'], fee=f['fee'], fee2=f['fee2'],
@@ -665,6 +757,8 @@ def main():
             rank_in_pool=f.get('rank_in_pool'),
             arena_corr=f.get('arena_corr'), arena_healthy=f.get('arena_healthy'),
             align=f.get('align'), arena_weak=f.get('arena_weak'),
+            slow_intact=f.get('slow_intact'), slow_label=f.get('slow_label'),
+            pos60=f.get('pos60'),
             r_y2=f['m'].get('r2y'), r_y3=f['m'].get('r3y'), r_ytd=f['m'].get('ytd'),
             r_since=f['m'].get('since'), inception=u.get('est'),
             series=pack_series(f['series'], n),
@@ -719,8 +813,8 @@ def main():
                   n_pool=len(sc['all']), n_scored=gate_ok,
                   n_gate=gate_ok, n_short=len(short_final), n_dropped_neg3m=dropped,
                   top_arena=top_arena, top_arena_n=top_n,
-                  picks_note=picks_note, pool_median=round(pool_med, 1),
-                  n_gate_bad=n_gate_bad, n_picks=len(picks),
+                  picks_note=picks_note, pool_median=round(quality_med, 1),
+                  n_slow_bad=n_slow_bad, n_picks=len(picks),
                   signal_perf=sig_perf,
                   src='天天基金净值/季报持仓 · 腾讯ETF行情',
                   rf='板块代理=代表ETF；持仓分类按股票名称关键词，可人工核对'),
@@ -740,22 +834,31 @@ def main():
         tstat[tt] = tstat.get(tt, 0) + 1
     buyzone = [p for p in all_out
                if (p.get('adv') or {}).get('pos60', 1) <= RULE['b_pos60_max']
-               and p.get('herd_gate', 0) >= 1.0]
-    cand_near = [p for p in all_out if p.get('herd_gate', 0) >= 1.0]
-    cand_near.sort(key=lambda p: (p.get('adv') or {}).get('pos60', 1))
+               and p.get('slow_intact', True)]
+    # 最接近买点的清单：从全质量池(质量>=中位 且 慢尺未断)按当前价位分位升序取前 3，
+    # 让「等什么价位」变成具体数字（即便今天还没到买点也能看到谁最接近）。
+    near_pool = [f for f in pool if f['slow_intact'] and f['score'] >= quality_med
+                  and not f.get('is_exit')]
+    near_pool.sort(key=lambda f: f['pos60'])
+
+    def _fair_line(series):
+        vs = [x[1] for x in series]
+        seg = vs[-60:]
+        lo, hi = min(seg), max(seg)
+        return round(lo + RULE['pos_tier_fair'] * (hi - lo), 4)
+
     near_buy = []
-    for p in cand_near[:3]:
-        adv = p.get('adv') or {}
-        line = (adv.get('tier_lines') or {}).get('fair')
-        last = (p.get('m') or {}).get('last') or 0
+    for f in near_pool[:3]:
+        line = _fair_line(f['series'])
+        last = f['m']['last']
         near_buy.append(dict(
-            code=p['code'], name=p['name'], score=p['score'],
-            pos60=adv.get('pos60'), line=line,
-            to_line=(round((line / last - 1) * 100, 1) if (line and last) else None)))
+            code=f['code'], name=f['name'], score=f['score'],
+            pos60=f['pos60'], line=line,
+            to_line=(round((line / last - 1) * 100, 1) if last else None)))
     out['meta']['tier_stat'] = tstat
     out['meta']['n_in_buyzone'] = len(buyzone)
     out['meta']['near_buy'] = near_buy
-    print('\n价位分布: 深度便宜 %d / 便宜 %d / 合理 %d / 偏高 %d  → 可买区(≤40%% 且板块未破位) %d 只' % (
+    print('\n价位分布: 深度便宜 %d / 便宜 %d / 合理 %d / 偏高 %d  → 可买区(≤40%% 且慢尺未断) %d 只' % (
         tstat['deep'], tstat['cheap'], tstat['fair'], tstat['high'], len(buyzone)))
     for x in near_buy:
         print('  最接近买点: %-22s 分数%5.1f 位置%3.0f%% 需跌 %s%% 到 %s' % (
