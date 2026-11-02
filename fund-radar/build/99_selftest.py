@@ -74,9 +74,18 @@ def main():
     hi = [p['code'] for p in short if (p['adv']['pos60'] or 0) > 0.40]
     print('  · 备选池里 %d 只价位偏高(>40%%)，属正常监控范围' % len(hi))
 
-    print('[3] 最近收益（备选池定义=近3月为正，用于监控；推荐不要求近3月为正）')
+    print('[3] 备选池口径（2026-11-02 改：全池展示，不再用「近3月为正」过滤）')
+    # 旧断言是追涨逻辑的残留：要求备选池每只近3月都为正 —— 那正是「把好基金正在回调的整批藏起来」的原因
+    # （实测 230 只里只剩 22 只）。现在备选池 = 全池扣除已推荐的前 30 只，用来让「详细数据」有全貌，
+    # 所以正确断言反过来：① 允许近3月为负 ② 每只必须带象限 ③ 不能和推荐重复。
     neg = [p['code'] for p in short if not (p['m']['r3m'] or 0) > 0]
-    chk('备选池无「近3月为负」', not neg, '异常: %s' % neg)
+    chk('备选池允许「近3月为负」（回调中的好基金必须能被看见）', len(neg) > 0, '近3月为负 %d 只' % len(neg))
+    noquad = [p['code'] for p in short if not p.get('quad')]
+    chk('备选池每只都带象限（否则页面无法标「别追/该走」）', not noquad, '缺象限: %s' % noquad)
+    pc = set(p['code'] for p in picks)
+    dup = [p['code'] for p in short if p['code'] in pc]
+    chk('备选池与推荐不重复', not dup, '重复: %s' % dup)
+    chk('备选池条数 = min(全池-推荐, 30)', len(short) <= 30, '%d 只' % len(short))
 
     print('[4] 去重（页面说"相关性 ≥0.75 视为同一个赌注"）')
     for p in picks:
