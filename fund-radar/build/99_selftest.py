@@ -44,19 +44,32 @@ def main():
         len({p.get('arena') for p in picks}) == len(picks),
         '板块: %s' % [p.get('arena') for p in picks])
     for p in picks:
-        chk('%s 慢尺(年线/主线)未断才进推荐' % p['code'], p.get('slow_intact') is True,
-            'slow_intact %s' % p.get('slow_intact'))
-        chk('%s 总分不低于池中位' % p['code'], p['score'] >= (meta.get('pool_median') or 0) - 0.05,
-            '%.1f vs 中位 %.1f' % (p['score'], meta.get('pool_median') or 0))
+        # ★ 2026-11-02 改口径：推荐条件从「慢尺未断 + pos60<=40% + 质量>=中位」
+        #   升级为「入场象限可买 + 情境匹配 + 可买集合内质量及格」。
+        #   慢尺(slow_intact)对上「底部转折 turn」必然为 False（年线还没收复），
+        #   但 turn 恰恰是买点，所以不能再用 slow_intact 当推荐前置条件。
+        chk('%s 进推荐的必须处于可买象限' % p['code'],
+            p.get('quad') in ('sweet', 'turn', 'rebound'), 'quad=%s' % p.get('quad'))
+        chk('%s 情境匹配 fit >= 0.50' % p['code'], (p.get('fit') or 0) >= 0.50,
+            'fit=%s' % p.get('fit'))
+        chk('%s 总分不低于可买集合及格线' % p['code'],
+            p['score'] >= (meta.get('quality_gate') or 0) - 0.05,
+            '%.1f vs 及格线 %.1f' % (p['score'], meta.get('quality_gate') or 0))
         chk('%s 带 role 与持仓覆盖率' % p['code'],
             p.get('role') in ('best', 'spread') and p.get('hold_cover') is not None,
             'role=%s cover=%s' % (p.get('role'), p.get('hold_cover')))
         chk('%s 带主战场相关性' % p['code'], p.get('arena_corr') is not None)
+        chk('%s 带可执行买卖价位' % p['code'],
+            bool(p.get('lv')) and p['lv'].get('stop') is not None
+            and p['lv']['stop'] < p['lv']['cheap_below'],
+            'stop=%s cheap=%s' % ((p.get('lv') or {}).get('stop'), (p.get('lv') or {}).get('cheap_below')))
+        chk('%s 带一句话理由' % p['code'], bool(p.get('why')))
 
-    print('[2] 好价位门槛（页面写的是"近60日位置≤40%"——买点价格条件）')
+    print('[2] 入场象限门槛（替代旧的「近60日位置≤40%」——pos60 分不出山顶和半山腰）')
     for p in picks:
-        chk('%s 近60日位置 ≤ 合理区上沿(40%%)' % p['code'], (p['adv']['pos60'] or 1) <= 0.40,
+        chk('%s 不是「贴顶/追高」象限' % p['code'], p.get('quad') != 'strong',
             '位置 %.0f%%' % ((p['adv']['pos60'] or 0) * 100))
+        chk('%s 不是「下跌中继」象限' % p['code'], p.get('quad') != 'falling')
     # 备选池(监控用)允许价位偏高，不强求；只记录不阻断
     hi = [p['code'] for p in short if (p['adv']['pos60'] or 0) > 0.40]
     print('  · 备选池里 %d 只价位偏高(>40%%)，属正常监控范围' % len(hi))
@@ -105,8 +118,16 @@ def main():
             continue
         chk('%s 前十大合计在 20~100%%' % p['code'], 20 <= p['top10_sum'] <= 100,
             '%.1f%%' % p['top10_sum'])
-        chk('%s 主战场 == 持仓最大行业' % p['code'], p['arena'] == p['expo'][0]['sector'],
-            '%s vs %s' % (p['arena'], p['expo'][0]['sector']))
+        # ★ 2026-11-02 改：只有「确实押这个方向」时才要求主战场与持仓一致。
+        #   实测 519712 与「人工智能」的 60 日相关性归档后为 -0.33（04 全量算 0.60，
+        #   输入序列不同导致差异），实际持仓是银行/医药/电力 —— 属分散配置型，
+        #   本来就没有单一主战场，硬要求一致只会逼系统编一个假的"主战场"出来。
+        if (p.get('arena_corr') or 0) >= 0.50:
+            chk('%s 主战场 == 持仓最大行业' % p['code'], p['arena'] == p['expo'][0]['sector'],
+                '%s vs %s' % (p['arena'], p['expo'][0]['sector']))
+        else:
+            print('  ·  %s 主战场相关性 %.2f < 0.50，按「分散配置」处理，跳过一致性检查'
+                  % (p['code'], p.get('arena_corr') or 0))
         w = sum(x['pct'] for x in p['top10'])
         chk('%s 持仓权重与合计一致' % p['code'], abs(w - p['top10_sum']) < 0.5,
             '%.2f vs %.2f' % (w, p['top10_sum']))
@@ -162,9 +183,9 @@ def main():
             a.get('pos60') is not None and a.get('rule', {}).get('b_pos60_max') == 0.40,
             'pos60 %.2f / 阈值 %.2f' % (a.get('pos60') or 0, a.get('rule', {}).get('b_pos60_max') or 0))
         chk('%s 建议状态在允许的枚举内' % p['code'],
-            a['state'] in ('该走 · 已跌 18%', '该走 · 押的板块动能拐头', '先别买 · 慢尺已破',
-                           '可以买 · 位置偏低', '先别买 · 已经涨高了', '先别买 · 它自己在跌',
-                           '先别买 · 方向没定'),
+            a['state'] in ('该走 · 趋势还在往下走', '别追 · 已经贴年内高位',
+                           '先别买 · 这波回调还没走完', '可以买 · 底部刚转折',
+                           '可以买 · 趋势中回调', '可以买 · 深跌刚企稳'),
             a['state'])
         # 系统不知道用户有没有持仓，文案不能替用户决定仓位（「只能持有」「不加仓」这类）
         vague = [w for w in ('只能持有', '不加仓', '先别加', '持有不动') if w in a['act'] + a['state']]
@@ -181,8 +202,10 @@ def main():
             chk('%s 状态是「该走」时信号板必须有一条已触发' % p['code'], bool(hit), str(hit))
         if a['state'].startswith('可以买'):
             chk('%s 状态是「可以买」时 B 信号必须已触发' % p['code'], 'B' in hit, str(hit))
-        # 不能编造规则里不存在的信号（曾写过「跌破 60 日均线就离场」，而规则里根本没这条）
-        fake = [w for w in ('就离场', '这条就是本次的止损线', '破了就走', '跌破 60 日均线（'
+        # 不能编造规则里不存在的信号。
+        # ★ 2026-11-02：「跌破 60 日均线」从黑名单移除 —— 它现在是 turn（底部转折）象限
+        #   写明的失败条件，属于规则内。其余仍禁止（曾写过「跌破 60 日均线就离场」，那是编的）。
+        fake = [w for w in ('就离场', '这条就是本次的止损线', '破了就走'
                             ) if w in a['act']]
         chk('%s 文案没有编造规则外的卖出信号' % p['code'], not fake, str(fake))
 

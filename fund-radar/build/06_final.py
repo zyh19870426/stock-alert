@@ -347,20 +347,32 @@ def advice(f, SECS=None):
 
     trend_ok = bool(a20 > a60 and not a60_dn)
     s2_ok = sector_turned(arena, f['series'], SECS)
-    b_ok = bool(sec_ok and pos60 <= RULE['b_pos60_max'])
+    # ★ 2026-11-02 改：买入信号的口径 = 入场象限可买（长/中/短三层趋势 + 位置），
+    #   不再用「pos60<=40%」这一条 —— 实测 519712 位置 68% 却是标准的「趋势中回调」买点，
+    #   而跌到位置 20% 的科技股正处在下跌中继，pos60 根本分不出两者。
+    b_ok = f.get('quad') in ('sweet', 'turn', 'rebound')
 
+    _b1 = bool(m.get('above120'))
+    _b2 = bool(m.get('above20') and m.get('above60') and m.get('ma60_up'))
+    _b3 = not (((m.get('dd250') if m.get('dd250') is not None else -1) > -0.03)
+               or ((m.get('r1m') or 0) >= 0.12))
     sig = [
         dict(k='B', label='买入信号', hit=b_ok, rows=[
-            dict(t='近 60 日位置 ≤ 40%',
-                 now='%.0f%%' % (pos60 * 100), ok=pos60 <= RULE['b_pos60_max'],
-                 need='要跌到 %.4f（%+.1f%%）' % (buy_line, (buy_line / c - 1) * 100)),
-            dict(t='慢尺(年线/主线)未断',
-                 now=(arena + ('：' + slow_label) if s3 else '无板块数据'),
-                 ok=sec_ok, need=''),
-            dict(t='短期走势（参考，非硬约束）',
-                 now='20日%.4f %s 60日%.4f，%s' % (a20, '>' if a20 > a60 else '<', a60,
-                                                 '上行' if not a60_dn else '下行'), ok=trend_ok, need=''),
-        ], n_bad=sum(1 for x in (pos60 <= RULE['b_pos60_max'], sec_ok) if not x)),
+            dict(t='长期趋势：站上 120 日均线',
+                 now='%s（年线%s）' % ('站上' if _b1 else '在下方',
+                                     '也已收复' if m.get('above250') else '还没收复'),
+                 ok=_b1, need=''),
+            dict(t='中短期趋势：站上 20/60 日均线且 60 日线上行',
+                 now='20日线%s、60日线%s，60日线%s' % (
+                     '上方' if m.get('above20') else '下方',
+                     '上方' if m.get('above60') else '下方',
+                     '上行' if m.get('ma60_up') else '下行'),
+                 ok=_b2, need=''),
+            dict(t='位置：不贴年内高点、最近没急涨',
+                 now='距年内高点 %.0f%%，近 20 日 %+.1f%%' % (
+                     -((m.get('dd250') or 0) * 100), (m.get('r1m') or 0) * 100),
+                 ok=_b3, need=''),
+        ], n_bad=sum(1 for x in (_b1, _b2, _b3) if not x)),
         dict(k='S1', label='卖出信号 · 长期趋势破位', hit=(not sec_ok), rows=[
             dict(t='长期趋势(年线/主线)未破',
                  now=(arena + ('：' + slow_label) if s3 else '无板块数据'),
@@ -413,42 +425,45 @@ def advice(f, SECS=None):
     s_line = ('按规则，卖出信号只有两类：长期趋势（年线/主线）破位，或它押的板块动能拐头（板块主线转弱）。'
               '单看「从高点回撤了多少百分比」不算卖出信号——跌多了可能只是上涨途中的回调，会随机反弹。')
 
-    if not sec_ok:
-        state, tone = '该走 · 长期趋势破位', 'bad'
-        act = ('它押的「%s」板块，长期主线（年线/MA120）已经破了（%s）。这才是真正的「该走」信号——'
-               '长期上涨趋势破了，后面大概率是下跌或震荡，不是短暂回调。'
-               '已经买了的：按纪律减仓/离场，别在破位下跌里扛。'
-               '还没买的：长期趋势坏了，短期跌再多也不算买点。' % (arena, slow_label))
-    elif s2_ok:
-        state, tone = '该走 · 押的板块动能拐头', 'bad'
-        act = ('它主要押的是「%s」板块。这个板块的动能分位从近 40 日内的最高 %.2f 掉到 %.2f，'
-               '触发「板块动能拐头」—— 长期主线转弱，后面大概率是下跌或震荡。'
-               '已经买了的：按纪律减仓/离场。还没买的：现在不是进场的时候。'
-               % (arena, rank_max40 or 0, rk))
-    elif sec_ok and pos60 <= RULE['b_pos60_max']:
-        state, tone = '可以买 · 位置偏低', 'ok'
-        act = ('三个条件同时满足：长期趋势未破（%s）、价格在近 60 个交易日区间的 %.0f%% 位置（规则要求 ≤%.0f%%）、'
-               '质量分够格。这是买点——注意是「长期趋势 intact 下的低位」，短期还在不在探底不影响这个判断。'
-               '买进去之后，%s 注意 60 日均线（%s）不是卖出线，它只是买点的趋势条件。'
-               % (slow_label, pos60 * 100, RULE['b_pos60_max'] * 100, s_line, stop))
-    elif trend_up:
-        state, tone = '先别买 · 已经涨高了', 'ok'
-        act = ('走势向上，但价格已经在近 60 日区间的 %.0f%% 位置，买入信号要求的「位置 ≤%.0f%%」这条不满足 —— 现在不是买点。'
-               '已经买了的：%s 这两条现在都没触发，所以规则上没有卖出动作，继续拿的理由是趋势还在、不是因为它便宜。'
-               '还没买的：不追，等跌到 %.4f 以下（%+.1f%%）再重新判断，那时还要确认趋势和板块没坏。'
-               % (pos60 * 100, RULE['b_pos60_max'] * 100, s_line,
-                  buy_line, (buy_line / c - 1) * 100))
-    elif c < a60 and a60_dn:
-        state, tone = '先别买 · 它自己在跌', 'bad'
-        act = ('这只基金「自己」的净值在 60 日均线（%s）下方，而且这条均线本身还在往下走。'
-               '买入信号要求「长期趋势未破 + 位置低」，长期趋势这一条不成立。'
-               '已经买了的：%s 都没触发，规则上不卖出，但也不会在这里加。'
-               '还没买的：等它自己站回长期主线。' % (stop, s_line))
-    else:
-        state, tone = '先别买 · 方向没定', 'warn'
-        act = ('基金自己的走势还没转强（20 日均线 %s 还没上穿 60 日均线 %s），长期趋势也未确认向上。'
-               '买入信号和卖出信号都不成立。已经买了的：%s 都没触发，规则上没有动作。'
-               '还没买的：先不动，等方向出来。' % (round(a20, 4), stop, s_line))
+    # ---- 状态结论：直接用入场象限（长/中/短三层趋势 + 位置），不再靠一堆均线组合去猜 ----
+    # ★ 2026-11-02 重写：六个状态一一对应六个象限，说人话、给动作。
+    quad = f.get('quad') or 'falling'
+    qtxt = f.get('quad_text') or ''
+    dd250p = abs((m.get('dd250') or 0) * 100)
+    if quad == 'falling':
+        state, tone = '该走 · 趋势还在往下走', 'bad'
+        act = ('这只处在下跌趋势里（%s），距年内高点还有 %.0f%% 没跌完。'
+               '已经买了的：这是规则里唯一的卖出信号（长期趋势破位），按纪律减仓/离场。'
+               '还没买的：跌得多不等于便宜，趋势没转之前不碰。' % (qtxt, dd250p))
+    elif quad == 'strong':
+        state, tone = '别追 · 已经贴年内高位', 'warn'
+        act = ('趋势是好的，但价格已经贴着年内高点（距高点只有 %.0f%%），这时候买就是接山顶。'
+               '已经买了的：趋势没坏，规则上没有卖出动作，可以继续拿。'
+               '还没买的：不追。等它回调到离高点 10%% 以上再来看。' % dd250p)
+    elif quad == 'pullback':
+        state, tone = '先别买 · 这波回调还没走完', 'warn'
+        act = ('长期趋势还在，但中短期已经走弱（%s），回调还没结束。'
+               '已经买了的：规则上没有卖出动作，继续拿。'
+               '还没买的：等它自己重新站回 20 日和 60 日均线，别在下跌途中去接。' % qtxt)
+    elif quad == 'turn':
+        state, tone = '可以买 · 底部刚转折', 'ok'
+        act = ('中短期已经修复（20/60/120 日均线都站上、60 日线开始上行），只是年线还没收复，'
+               '位置比年内高点低 %.0f%% —— 这是底部转折的右侧早期，不是半山腰。'
+               '已经买了的：规则上没有卖出动作。'
+               '还没买的：可以分批买；跌破 60 日均线（%.4f）说明转折失败，要退出来。'
+               % (dd250p, stop))
+    elif quad == 'sweet':
+        state, tone = '可以买 · 趋势中回调', 'ok'
+        act = ('长期趋势完好（20/60/120/250 日均线全在上方），离年内高点还有 %.0f%% 空间，最近也没急涨。'
+               '这是「上升趋势里的小回调」，比追高安全。'
+               '已经买了的：规则上没有卖出动作。'
+               '还没买的：可以买；跌破 60 日均线（%.4f）说明趋势转弱，要退出来。'
+               % (dd250p, stop))
+    else:                                  # rebound
+        state, tone = '可以买 · 深跌刚企稳', 'ok'
+        act = ('从年内高点跌了 %.0f%%，刚站回 20 日均线 —— 右侧信号才刚出现，位置偏左侧。'
+               '已经买了的：规则上没有卖出动作。'
+               '还没买的：想搏反弹可以小仓试，跌破 20 日均线就走，别扛。' % dd250p)
     # 18% 回撤不再是「该走」触发条件：跌多了可能只是上涨途中的回调，会随机反弹。
     # 只有当长期趋势(年线/主线)也破了，才算真该走。这里如实告知回撤幅度，但不作为卖出信号。
     if dd120 <= RULE['s_dd120'] and sec_ok:
@@ -632,6 +647,10 @@ def main():
     #   slow_intact=True 表示「年线/主线未断」——好基金短期回踩(板块跌破MA20但年线仍在)仍是好基金。
     #   herd_gate 改为慢尺状态镜像(1.0/0.5)，仅用于前端 chip 与自检兼容。
     for f in pool:
+        # ★ 2026-11-02 修 bug：arena 在本文件被大量引用（慢尺/板块信号/同注去重），
+        #   但 04 只产出 main_sector，从未给 arena 赋值 —— f['arena'] 全是 None，
+        #   导致去重键失效（第一只加入 {None} 后其余全被跳过）、慢尺取不到板块数据。
+        f['arena'] = f.get('main_sector') or ''
         p60, _ = cur_pos(f['series'])
         f['pos60'] = p60
         intact, slow_label, slow_which = slow_scale(f, SECS)
@@ -639,8 +658,13 @@ def main():
         f['slow_label'] = slow_label
         f['slow_which'] = slow_which
         f['herd_gate'] = 1.0 if intact else 0.5
-        # ★ 该走互斥：长期趋势(年线/主线)已破，或板块动能拐头 → 绝不进推荐位（避免“让被套”）
-        f['is_exit'] = (not intact) or sector_turned(f.get('arena', ''), f['series'], SECS)
+        # ★ 2026-11-02 改：「该走」直接用入场象限判定（象限已综合基金自身长/中/短三层趋势
+        #   与「板块转了但基金没跟上」的掉队情况）。
+        #   不再叠加 sector_turned —— 那是给持仓者的板块动能提示，若拿来否决买入会误杀：
+        #   实测 519712 自身 MA20/60/120/250 全在、距高点仅 -5.8%，却因相关性最高的
+        #   「人工智能」板块动能拐头被判该走。板块崩了它没崩，说明它没在那个板块里。
+        f['is_exit'] = (f.get('quad') == 'falling')
+        f['sector_turned'] = sector_turned(f.get('arena', ''), f['series'], SECS)
 
     # ---- 相关系数矩阵（90 日）----
     def rmap(f):
@@ -660,24 +684,40 @@ def main():
         syy = sum((y[i] - my) ** 2 for i in range(n))
         return sxy / math.sqrt(sxx * syy) if sxx > 0 and syy > 0 else 0.0
 
-    # ---- 推荐：质量优先 + 好价位 + 慢尺未断，宁缺毋滥 ----
-    # ★ 2026-11-01 修正（解决“好基金跌到好价格就不是好基金”的矛盾）：
-    #   买点 = 质量基金(质量分>=池中位) + 好价位(pos60<=合理区上沿) + 慢尺未断(年线/主线还在)。
-    #   质量分本身已不随短期涨跌掉档；这里的门槛只卡“时机”，卡的是“慢尺”而非“板块MA20”。
-    #   所以：好基金短期回踩、板块跌破MA20但年线仍在 → 质量分不掉、慢尺未断、跌到便宜区照样进推荐。
-    # ① 慢尺未断（slow_intact）：年线/主线还在，长期趋势没坏。
-    # ② 好价位：pos60 <= 合理区上沿(40%)，即“不追高”的硬约束。
-    # ③ 质量门槛：质量分 >= 池中位，不拿低分基金凑数。
-    # ④ 同注去重按「板块」判（2026-11-01 修正）：同一 arena 只取分数最高的一只。
-    # ⑤ 再加一道相关性闸：不同板块但走势雷同（>=0.75）仍算同一个赌注。
-    # ⑥ 凑不满 3 只就如实给更少，并在 picks_note 里写明挡住了什么。
+    # ---- 推荐：入场象限可买 + 质量及格 + 情境匹配，宁缺毋滥 ----
+    # ★ 2026-11-02 重构（回答「灵活选当下情境最优、别买山顶、别买半山腰」）：
+    #   旧逻辑只有两维（质量分 + 近60日价位 pos60），分不出「趋势刚转折的底部」
+    #   和「跌不透的半山腰」—— 这两者 pos60 都很低，旧逻辑会把半山腰当成买点。
+    #   新逻辑三层：
+    #     ① 入场象限（04 算好，见 quadrant()）：sweet 趋势中回调 / turn 底部转折 /
+    #        rebound 深跌刚企稳 → 可买；strong 贴顶(山顶) / falling 下跌中继(半山腰) /
+    #        pullback 回调未完成 → 不买
+    #     ② 质量 >= 池的 40% 分位（及格线，不拿垃圾凑数）
+    #     ③ 情境匹配 fit >= 0.50（他的风格与能力圈跟当下环境对得上）
+    #   排序 = 匹配 50% + 质量 50%，找的是「当下最优」而不是「历史上最强」。
+    #   ④ 同注去重按板块：同一 arena 只取最优一只；⑤ 相关性 >=0.75 视为同一赌注；
+    #   ⑥ 凑不满 3 只就如实给更少，并在 picks_note 里写明挡住了什么。
+    BUY_QUADS = ('sweet', 'turn', 'rebound')
     scores_sorted = sorted(f['score'] for f in pool)
     quality_med = scores_sorted[len(pool) // 2] if scores_sorted else 0
-    qual = [f for f in pool
-            if f['slow_intact']
-            and f['pos60'] <= RULE['pos_tier_fair']
-            and f['score'] >= quality_med
-            and not f.get('is_exit')]
+    # ★ 2026-11-02 改：质量门槛在「可买象限内部」定，不再用全池分位。
+    #   为什么：全池 200+ 只里绝大多数现在根本不能买（趋势破/贴顶），用它们的分布
+    #   当门槛是刻度错位 —— 实测全池 40% 分位 = 62 分，而当前唯一可买的三只只有 57~65，
+    #   结果只推出 1 只。质量分是跨方向可比的绝对值，但「可买方向」天然不在高分位
+    #   （高分的早涨完了）。所以：先由入场象限 + 情境匹配把关，质量只在可买集合内部
+    #   剔掉最差的那一批（可买数量多时用）。
+    buy_pool = [f for f in pool
+                if f.get('quad') in BUY_QUADS
+                and (f.get('fit') or 0) >= 0.50
+                and not f.get('is_exit')]
+    if len(buy_pool) > 6:
+        bq = sorted(f['score'] for f in buy_pool)
+        quality_gate = bq[int(len(bq) * 0.40)]
+        qual = [f for f in buy_pool if f['score'] >= quality_gate]
+    else:
+        quality_gate = min([f['score'] for f in buy_pool], default=0.0)
+        qual = buy_pool
+    qual.sort(key=lambda x: -(0.5 * (x.get('fit') or 0) + 0.5 * x['score'] / 100.0))
     picks = []
     used_arena = set()
     for f in qual:
@@ -697,30 +737,31 @@ def main():
         f['role'] = 'best' if i == 0 else 'spread'
         f['score_gap_best'] = round(best_score - f['score'], 1)
         f['rank_in_pool'] = rank_of.get(f['code'])
-    n_slow_bad = sum(1 for f in pool if not f['slow_intact'])
-    n_price_bad = sum(1 for f in pool if f['pos60'] > RULE['pos_tier_fair'])
-    n_lowq = sum(1 for f in pool if f['score'] < quality_med)
-    n_exit = sum(1 for f in pool if f.get('is_exit'))
+    n_exit = sum(1 for f in pool if f.get('quad') == 'falling')
+    n_top = sum(1 for f in pool if f.get('quad') == 'strong')
+    n_wait = sum(1 for f in pool if f.get('quad') == 'pullback')
+    n_lowq = sum(1 for f in pool
+                 if f.get('quad') in BUY_QUADS
+                 and (f.get('fit') or 0) >= 0.50
+                 and f['score'] < quality_gate)
     n_same_arena = sum(1 for f in qual
                        if f['code'] not in picked_codes and f['arena'] in used_arena)
     if len(picks) >= 3:
         picks_note = ''
     else:
         bits = []
+        if n_top:
+            bits.append('%d 只已经贴着年内高位、再买就是接山顶' % n_top)
         if n_exit:
-            bits.append('%d 只长期趋势已破(该走)，不推' % n_exit)
-        if n_slow_bad:
-            bits.append('%d 只慢尺(年线/主线)已破，时机未到' % n_slow_bad)
-        if n_price_bad:
-            bits.append('%d 只价位偏高(>合理区)，等回调' % n_price_bad)
+            bits.append('%d 只趋势还在往下走、没跌透（半山腰）' % n_exit)
+        if n_wait:
+            bits.append('%d 只长期趋势还在、但这波回调还没走完' % n_wait)
         if n_lowq:
-            bits.append('%d 只质量分低于池中位' % n_lowq)
+            bits.append('%d 只质地不够格' % n_lowq)
         if n_same_arena:
-            bits.append('%d 只同样押「%s」已按同注去重只留最优' % (
-                n_same_arena, '、'.join(sorted(used_arena))))
-        picks_note = ('今天只给 %d 只：%d 只候选里 %s。'
-                      '按「质量优先 + 好价位 + 慢尺未断 + 同注去重、宁缺毋滥」，'
-                      '不为了凑满 3 只去推一只时机未到、或押同一个板块的基金。'
+            bits.append('%d 只跟上榜的押同一个方向，去重只留最优' % n_same_arena)
+        picks_note = ('今天能买 %d 只。%d 只候选里，%s。'
+                      '宁可少给，也不为了凑数推一只正在山顶、或没跌透的。'
                       % (len(picks), len(pool), '；'.join(bits)))
     for f in picks:
         f['corr_with'] = [dict(code=p['code'], name=p['name'], corr=round(pcorr(f['code'], p['code']), 2))
@@ -735,10 +776,90 @@ def main():
     for f in pool[3:12]:
         print('  %-8s %-20s %5.1f分 [%s]' % (f['code'], f['name'][:18], f['score'], f['arena']))
 
+    # ---- 可执行信息（页面只展示这几句，不堆数据）----
+    def _why(f):
+        """一句话：为什么是它。"""
+        pr = f.get('prof') or {}
+        q = f.get('quad')
+        dd = abs((f['m'].get('dd250') or 0) * 100)
+        bits = []
+        if q == 'sweet':
+            bits.append('趋势三层都还在，离年内最高点还有 %.0f%% 的距离（没涨到顶）' % dd)
+        elif q == 'turn':
+            bits.append('中短期刚修复、年线还没收复，位置比年内最高点低 %.0f%%' % dd)
+        elif q == 'rebound':
+            bits.append('跌了 %.0f%% 之后刚站回 20 日均线' % dd)
+        mgr0 = (f.get('mgr') or [{}])[0]
+        nm, ten = (mgr0.get('name') or ''), (pr.get('tenure') or 0)
+        dfn, atk = pr.get('defend'), pr.get('attack')
+        if nm and ten:
+            if dfn is not None and dfn > 0.03:
+                bits.append('%s 管了 %.0f 年，市场下跌的年份平均比大盘少亏 %.0f 个点'
+                            % (nm, ten, dfn * 100))
+            elif atk is not None and atk > 0.05:
+                bits.append('%s 管了 %.0f 年，上涨年份平均比大盘多赚 %.0f 个点'
+                            % (nm, ten, atk * 100))
+            else:
+                bits.append('%s 管了 %.0f 年' % (nm, ten))
+        return '；'.join(bits)
+
+    def _levels(f):
+        """买什么价、什么时候走 —— 全是具体净值，可直接挂单。
+        ★ 2026-11-02：止损口径必须按象限分开，否则会和买点打架。
+          实测第一版对 519712 给出「买点 5.08 / 止损 5.2432」——止损在买点之上，逻辑矛盾。
+          原因：趋势完好的基金贴着 60 日线走，用 MA60 当止损只有 1% 空间，太紧且压住买点。
+          所以：sweet(趋势完好) 用 120 日线与 18% 回撤的更宽者；
+                turn(底部转折) 才用 60 日线 —— 因为「跌回 60 日线下方」正是转折失败的定义；
+                rebound(深跌刚企稳) 用 20 日线，反弹失败就走。
+        """
+        vs = [x[1] for x in f['series']]
+        c0 = vs[-1]
+        quad = f.get('quad')
+        seg = vs[-60:]
+        lo, hi = min(seg), max(seg)
+        fair = lo + RULE['pos_tier_fair'] * (hi - lo)
+        ma20 = sum(vs[-20:]) / 20
+        ma60 = sum(vs[-60:]) / 60
+        ma120 = sum(vs[-120:]) / 120 if len(vs) >= 120 else ma60
+        hi250 = max(vs[-250:]) if len(vs) >= 250 else max(vs)
+        dd18 = hi250 * (1 + RULE['s_dd120'])
+
+        def pack(stop, plan, stop_text, cheap=None):
+            ch = min(fair, c0) if cheap is None else cheap
+            return dict(now=round(c0, 4), buy_high=round(c0 * 1.005, 4),
+                        cheap_below=round(ch, 4),
+                        add_below=round(min(ch, c0 * 0.95), 4),
+                        stop=round(stop, 4), stop_text=stop_text, plan=plan,
+                        hi250=round(hi250, 4))
+
+        if quad == 'sweet':
+            stop = min(ma120, dd18)
+            return pack(stop,
+                        '现价 %.4f 以内就能买；跌到 %.4f 更划算' % (c0 * 1.005, fair),
+                        '跌破 120 日均线 %.4f、或从年内高点 %.4f 回撤 18%%（到 %.4f）就走'
+                        % (ma120, hi250, dd18))
+        if quad == 'rebound':
+            return pack(ma20,
+                        '现价 %.4f 附近小仓试，不要一次买满' % (c0 * 1.005),
+                        '跌破 20 日均线 %.4f 就走（反弹失败）' % ma20)
+        # turn：右侧转折，买点就在现价附近；「更划算价」不能压到止损线以下，
+        # 否则等于让人等一个「一到就该止损」的价格（实测 001714 第一版就是这样）。
+        return pack(ma60,
+                    '现价 %.4f 以内可以分批买，别一次买满' % (c0 * 1.005),
+                    '跌破 60 日均线 %.4f 说明转折失败，走' % ma60,
+                    cheap=min(c0, max(fair, ma60 * 1.02)))
+
     def brief(f, n=750):
         u = uni.get(f['code'], {})
         return dict(
             code=f['code'], name=f['name'], score=f['score'],
+            quad=f.get('quad'), quad_text=f.get('quad_text'), quad_src=f.get('quad_src'),
+            fit=f.get('fit'), why=_why(f), lv=_levels(f),
+            prof=dict(style=(f.get('prof') or {}).get('style'),
+                      attack=(f.get('prof') or {}).get('attack'),
+                      defend=(f.get('prof') or {}).get('defend'),
+                      tenure=(f.get('prof') or {}).get('tenure'),
+                      inherit_risk=(f.get('prof') or {}).get('inherit_risk')),
             s_ret=f['s_ret'], s_trend=f['s_trend'], s_herd=f['s_herd'],
             s_skill=f.get('s_skill'), s_mgr=f.get('mgr_score'), s_risk=f['s_risk'],
             mgr_q=f.get('mgr_q'), mgr_sum=f.get('mgr_sum'),
@@ -768,13 +889,14 @@ def main():
 
     # 备选池只放「最近三个月确实在赚钱」的：22 只过了趋势门槛，其中一部分近3月还是负的，
     # 那只满足"技术形态"，不满足页面上写的"最近收益优秀"，所以单独剔出去并记数。
+    # ★ 2026-11-02 改：备选池不再用「近3月为正」过滤。
+    #   那是旧追涨逻辑的残留 —— 会把「好基金正在回调」整批藏起来（实测 230 只只显示 22 只），
+    #   而用户恰恰需要在这批里看到「哪些在等、哪些不能碰」。现在给出全池（扣除已推荐），
+    #   每只都带象限，让「详细数据」这一页真的有全貌。
     gate_ok = len(pool)
-    cand_short = [f for f in pool if (f['m']['r3m'] or 0) > 0]
-    dropped = gate_ok - len(cand_short)
     picks_codes = {f['code'] for f in picks}
-    short_final = [f for f in cand_short if f['code'] not in picks_codes][:22]
-    if len(short_final) < 3:
-        short_final = [f for f in cand_short][:22]
+    short_final = [f for f in pool if f['code'] not in picks_codes][:30]
+    dropped = 0
 
     def brief_all(f):
         return brief(f, 750)
@@ -807,6 +929,15 @@ def main():
         if items:
             sig_perf.append(dict(date=rec['date'], items=items))
 
+    # 方向状态板：把 39 个板块按象限分组，让用户一眼看到「哪个方向现在什么状态」
+    board = {}
+    for _s in sc['sectors']:
+        board.setdefault(_s['quad'], []).append(
+            dict(label=_s['label'], r20=round((_s.get('r20') or 0) * 100, 1),
+                 dd250=round((_s.get('dd250') or 0) * 100, 1)))
+    for _k in board:
+        board[_k].sort(key=lambda x: x['dd250'])
+
     out = dict(
         meta=dict(gen=__import__('time').strftime('%Y-%m-%d %H:%M'),
                   data_date=pool[0]['m']['last_date'],
@@ -814,7 +945,9 @@ def main():
                   n_gate=gate_ok, n_short=len(short_final), n_dropped_neg3m=dropped,
                   top_arena=top_arena, top_arena_n=top_n,
                   picks_note=picks_note, pool_median=round(quality_med, 1),
-                  n_slow_bad=n_slow_bad, n_picks=len(picks),
+                  quality_gate=round(quality_gate, 1),
+                  n_top=n_top, n_exit=n_exit, n_wait=n_wait,
+                  n_picks=len(picks), context=sc.get('context'), board=board,
                   signal_perf=sig_perf,
                   src='天天基金净值/季报持仓 · 腾讯ETF行情',
                   rf='板块代理=代表ETF；持仓分类按股票名称关键词，可人工核对'),
@@ -832,14 +965,15 @@ def main():
     for p in all_out:
         tt = (p.get('adv') or {}).get('pos_tier') or 'high'
         tstat[tt] = tstat.get(tt, 0) + 1
-    buyzone = [p for p in all_out
-               if (p.get('adv') or {}).get('pos60', 1) <= RULE['b_pos60_max']
-               and p.get('slow_intact', True)]
-    # 最接近买点的清单：从全质量池(质量>=中位 且 慢尺未断)按当前价位分位升序取前 3，
-    # 让「等什么价位」变成具体数字（即便今天还没到买点也能看到谁最接近）。
-    near_pool = [f for f in pool if f['slow_intact'] and f['score'] >= quality_med
-                  and not f.get('is_exit')]
-    near_pool.sort(key=lambda f: f['pos60'])
+    buyzone = [f for f in pool if f.get('quad') in ('sweet', 'turn', 'rebound')]
+    # 「差一步」清单（2026-11-02 改）：pullback = 长期趋势还在、但这波回调还没走完。
+    # 这才是值得盯的埋伏位 —— 比「跌得最惨的」健康得多，因为长期趋势没坏。
+    near_pool = [f for f in pool
+                 if f.get('quad') == 'pullback'
+                 and f['score'] >= quality_gate
+                 and (f.get('fit') or 0) >= 0.40
+                 and not f.get('is_exit')]
+    near_pool.sort(key=lambda f: -f['score'])
 
     def _fair_line(series):
         vs = [x[1] for x in series]
@@ -853,17 +987,38 @@ def main():
         last = f['m']['last']
         near_buy.append(dict(
             code=f['code'], name=f['name'], score=f['score'],
-            pos60=f['pos60'], line=line,
+            pos60=f['pos60'], line=line, fit=f.get('fit'),
+            quad=f.get('quad'), quad_text=f.get('quad_text'),
+            arena=f.get('main_sector'),
             to_line=(round((line / last - 1) * 100, 1) if last else None)))
+
+    # 「质地最好但现在不能买」—— 直接回答「为什么 85 分的不推」：
+    # 让用户看到好基金在哪、以及它卡在哪一步。
+    watch_top = []
+    for f in pool[:6]:
+        if f.get('quad') in ('sweet', 'turn', 'rebound'):
+            continue
+        reason = dict(strong='已经贴着年内高位，现在买是接山顶',
+                      falling='趋势还在往下走、没跌透（半山腰）',
+                      pullback='长期趋势在，但这波回调还没走完').get(
+                          f.get('quad'), f.get('quad_text') or '时机未到')
+        watch_top.append(dict(code=f['code'], name=f['name'], score=f['score'],
+                              quad=f.get('quad'), reason=reason,
+                              arena=f.get('main_sector'), fit=f.get('fit')))
+        if len(watch_top) >= 4:
+            break
+
     out['meta']['tier_stat'] = tstat
     out['meta']['n_in_buyzone'] = len(buyzone)
     out['meta']['near_buy'] = near_buy
-    print('\n价位分布: 深度便宜 %d / 便宜 %d / 合理 %d / 偏高 %d  → 可买区(≤40%% 且慢尺未断) %d 只' % (
-        tstat['deep'], tstat['cheap'], tstat['fair'], tstat['high'], len(buyzone)))
+    out['meta']['watch_top'] = watch_top
+    print('\n可买象限 %d 只 | 差一步(长期在·回调未完) %d 只' % (len(buyzone), len(near_pool)))
     for x in near_buy:
-        print('  最接近买点: %-22s 分数%5.1f 位置%3.0f%% 需跌 %s%% 到 %s' % (
+        print('  差一步: %-22s 质量%5.1f 位置%3.0f%% 到合理线 %s%%' % (
             x['name'][:18], x['score'], (x['pos60'] or 0) * 100,
-            x['to_line'] if x['to_line'] is not None else '—', x['line']))
+            x['to_line'] if x['to_line'] is not None else '—'))
+    for x in watch_top:
+        print('  质量高但不能买: %-20s %5.1f 分 ← %s' % (x['name'][:16], x['score'], x['reason']))
 
     json.dump(out, open(OUT, 'w', encoding='utf-8'), ensure_ascii=False, separators=(',', ':'))
     print('\n-> %s  %.0f KB' % (OUT, os.path.getsize(OUT) / 1024))

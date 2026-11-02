@@ -102,6 +102,12 @@ def metrics(series):
     c = vs[-1]
     a20, a60, a120 = ma20[-1], ma60[-1], ma120[-1]
     a20_5 = ma20[-6] if len(ma20) > 5 and ma20[-6] else a20
+    a60_10 = ma60[-11] if len(ma60) > 10 and ma60[-11] else a60
+    # ★ 2026-11-02 加：年线(MA250)与距年内高点回撤 —— 判断「山顶 / 半山腰 / 底部转折」必须用
+    ma250 = ma(vs, 250)
+    a250 = ma250[-1]
+    a250_10 = ma250[-11] if len(ma250) > 10 and ma250[-11] else a250
+    hi250 = max(vs[-250:]) if n >= 250 else max(vs)
 
     # 距今高点回撤（近1年）
     hi1y = max(seg)
@@ -135,9 +141,12 @@ def metrics(series):
         vol=vol,
         sharpe=((r1y - 0.015) / vol) if (r1y is not None and vol > 0) else None,
         mdd=mdd, dd_hi=c / hi1y - 1,
-        ma20=round(a20, 4), ma60=round(a60, 4), ma120=round(a120, 4),
+        ma20=round(a20, 4), ma60=round(a60, 4), ma120=round(a120, 4), ma250=round(a250, 4),
         above20=c > a20, above60=c > a60, above120=c > a120,
+        above250=(c > a250) if a250 else None,
         ma20_up=a20 > a20_5, ma20_slope=(a20 / a20_5 - 1) if a20_5 else 0,
+        ma60_up=a60 > a60_10, ma250_up=(a250 > a250_10) if a250 else None,
+        dd250=(c / hi250 - 1) if hi250 else None,
         ma20_gap=c / a20 - 1, ma60_gap=c / a60 - 1,
         streak=st,
         pos120=(c - min(vs[-120:])) / (max(vs[-120:]) - min(vs[-120:])) if len(vs) >= 120 and max(vs[-120:]) > min(vs[-120:]) else None,
