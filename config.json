@@ -100,6 +100,14 @@
       "target": 17,
       "enabled": true,
       "addedAt": "2026-09-26"
+    },
+    {
+      "code": "300221",
+      "name": "银禧科技",
+      "condition": "lte",
+      "target": 5.8,
+      "enabled": true,
+      "addedAt": "2026-11-03"
     }
   ],
   "deleted": [
