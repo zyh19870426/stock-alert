@@ -1,0 +1,84 @@
+name: nt-trbond-daily
+
+# 国家队（宽基ETF份额 + 季报直接持股）与股债相对强弱：每交易日收盘后重算，
+# 提交回本仓，供控制台运行时从云端（jsDelivr / raw）读取。
+#
+# ★为什么改成云端日更：这两份数据以前是"本地跑脚本 → 重新发布站点"才有新数据，
+#   不发布就一直停在旧日期，页面看上去像"没数据"。与 flow/fng/rotation/margin
+#   统一成同一架构后，数据自己每天更新，页面永不静默过期。
+#
+# cron 用 UTC：北京 22:10 = UTC 14:10
+#   · A股 15:00 收盘，ETF 当日份额/规模已可读
+#   · 债基净值一般 20:00-21:00 更新完毕，22:10 跑能吃到当日净值
+#   · 错开其他任务（fund-radar 13:30 / heartbeat 15:40 / rotation 11:30）
+#
+# 全流水线约 3~5 分钟（国家队要翻 8 个报告期 + 全市场行业映射）。给 25 分钟预算。
+on:
+  schedule:
+    - cron: '10 14 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nt-trbond-daily
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # 数据源连通性预检：只打印状态、不阻塞（continue-on-error）。
+      # 这两份数据依赖 6 个外部端点，跑在 GitHub 海外运行器上——若某个域名不可达，
+      # 日志里能一眼看出是"网络不通"而不是"脚本有 bug"。
+      - name: Preflight 数据源连通性
+        continue-on-error: true
+        run: |
+          for u in \
+            "https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=gmbd&code=510300" \
+            "https://push2test.eastmoney.com/api/qt/stock/get?secid=1.510300&fields=f43,f116" \
+            "https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_F10_EH_FREEHOLDERS&pageSize=1" \
+            "https://qt.gtimg.cn/q=sh000001" \
+            "https://www.csindex.com.cn/csindex-home/perf/index-perf?indexCode=H00300&startDate=20260101&endDate=20261231" \
+            "https://fund.eastmoney.com/pingzhongdata/202101.js" ; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 25 -A 'Mozilla/5.0' "$u" 2>/dev/null || echo ERR)
+            echo "$code  <-  $u"
+          done
+
+      # 两个脚本均 fail-fast：数据源异常时 process.exit(1)，后续步骤不再执行、
+      # 不产生 commit，仓库保留上一版好数据（脚本内已加"只只成功数不足就拒写"的安全闸）。
+      # 国家队脚本内含交易日闸门（trade-day.js）：A股节假日触发时打印一行即退出。
+      - name: Build 国家队 (nt-data.json / nt-daily.json)
+        run: node build-nt-data.js
+
+      - name: Build 股债相对强弱 (tr-bond-data.json)
+        run: node tr-bond-build.js
+
+      - name: Commit data
+        run: |
+          git add nt-data.json nt-daily.json tr-bond-data.json
+          if ! git diff --cached --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: update nt/tr-bond data [skip ci]"
+            git pull --rebase --autostash origin ${GITHUB_REF_NAME} || true
+            git push || (sleep 5 && git pull --rebase --autostash origin ${GITHUB_REF_NAME} && git push)
+          else
+            echo "数据无变化"
+          fi
+
+      # 清 jsDelivr 分支缓存（@main 约 12h）—— 否则前端的 jsDelivr 通道会长时间返回昨日旧档
+      - name: Purge jsDelivr cache
+        run: |
+          for f in nt-data.json nt-daily.json tr-bond-data.json; do
+            curl -sS --max-time 20 "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@${GITHUB_REF_NAME}/$f" || true
+            echo "purged $f"
+          done
