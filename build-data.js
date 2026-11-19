@@ -125,8 +125,12 @@ async function emKline(code, days, tries = 2) {
   throw last;
 }
 
-// 双源：优先新浪（本地快），失败转东财 push2his（境外云端可用）
+// K线源选择：本地默认新浪（快），云端用 KLINE_SRC=em 直接走东财 push2his
+// 境外 GitHub 访问新浪不通，若"新浪优先"会每只空等超时，4491 只必然超时
+const KLINE_SRC = process.env.KLINE_SRC || 'auto';
 async function kline(code, days) {
+  if (KLINE_SRC === 'em') return await emKline(code, days, 3);
+  if (KLINE_SRC === 'sina') return await sinaKline(code, days, 3);
   try { return await sinaKline(code, days, 2); }
   catch (e) { return await emKline(code, days, 2); }
 }
