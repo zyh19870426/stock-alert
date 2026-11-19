@@ -341,9 +341,9 @@ function median(arr) {
     meta: {
       tradeDate: dispDate,
       generatedAt: new Date().toISOString(),
-      source: '东方财富 datacenter-web + 腾讯前复权K线',
-      formula: '维保比例(%) = 180 × 现价 / MA20成本价（前复权）',
-      note: '两融数据T+1披露；维保为模拟测算口径，融资均价用MA20近似（原报告用融资买入额加权，差异约1%）',
+      source: '东方财富 datacenter-web（两融明细 + 历史收盘价）',
+      formula: '维保比例(%) = 180 × 现价 / MA20成本价',
+      note: '两融数据T+1披露；成本价用近20交易日收盘均价近似（原报告用融资买入额加权，差异约1%）；现价与成本同源，比值不受复权影响',
       lev: LEV
     },
     kpi: {
