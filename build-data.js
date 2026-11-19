@@ -209,23 +209,9 @@ function median(arr) {
   if (LIMIT) stocks = stocks.slice(0, LIMIT);
   console.error('  有效融资标的:', stocks.length);
 
-  console.error('[3/6] 拉行业映射 ...');
-  const indMap = {};
-  // fs 需整体编码：冒号→%3A、加号→%2B（逗号保留原样），否则 curl 会把 + 当特殊字符
-  const fs_ = 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23';
-  const fsEnc = fs_.replace(/:/g, '%3A').replace(/\+/g, '%2B');
-  try {
-    for (let pn = 1; pn <= 30; pn++) {
-      const url = `https://push2.eastmoney.com/api/qt/clist/get?pn=${pn}&pz=200&po=1&invt=2&fltt=2&fid=f3&fs=${fsEnc}&fields=f12%2Cf14%2Cf100`;
-      const j = await httpRetry(url, 5, 20000, false);
-      const diff = j && j.data && j.data.diff;
-      if (!diff) break;
-      const arr = Array.isArray(diff) ? diff : Object.values(diff);
-      arr.forEach(x => { if (x.f12) indMap[x.f12] = x.f100 || '其他'; });
-      if (arr.length < 200) break;
-    }
-  } catch (e) { console.error('  行业映射降级为“其他”:', e.message.slice(0, 80)); }
-  console.error('  行业映射:', Object.keys(indMap).length);
+  // 行业映射已废弃：网页改用两融明细自带的 TRADE_MARKET 板块字段，稳定可靠。
+  // 原 push2 clist 行业接口在境外/本机都不稳定，30页×5次重试会把云端任务拖到超时，故移除。
+  console.error('[3/6] 行业维度改用两融明细自带板块字段（跳过 push2 行业接口）...');
 
   console.error('[4/6] 拉市场融资余额历史(近12交易日) ...');
   const hist = await httpRetry(DC + qstr({
@@ -262,7 +248,7 @@ function median(arr) {
       code: s.SCODE,
       name: s.SECNAME,
       secucode: s.SECUCODE || '',
-      industry: indMap[s.SCODE] || '其他',
+      industry: s.TRADE_MARKET || '其他',  // 行业维度已废弃，用板块字段兜底
       market: s.TRADE_MARKET || '',
       rzye: Number(s.RZYE) || 0,          // 融资余额(元)
       rzmre: Number(s.RZMRE) || 0,        // 融资买入额(元)
@@ -371,7 +357,6 @@ function median(arr) {
       sample: rows.length
     },
     buckets, sensitivity, industries, markets,
-    indMap,
     rzSeries,
     lowest: rows.slice(0, 200),
     focus
