@@ -1,0 +1,51 @@
+name: margin-risk-daily 融资盘维保日报数据刷新
+
+# 每交易日北京时间 16:35 重算融资盘维保数据（两融 T+1 披露，盘后更新）
+# UTC 08:35 = 北京 16:35（错开 margin-daily 的 16:20，避免抢同一分钟）
+# 产物 margin-risk.json 推到仓库根目录 → jsDelivr CDN 自动分发 → 日报网页直读 CDN
+on:
+  schedule:
+    - cron: '35 8 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: margin-risk-daily
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 生成融资盘维保数据
+        run: node build-data.js --conc 12
+
+      - name: 校验产物
+        run: |
+          node -e "const d=require('./margin-risk.json'); if(!d.meta||!d.kpi||d.kpi.sample<1000) process.exit(1); console.log('OK',d.meta.tradeDate,d.kpi.sample,'只',d.kpi.weightedWb,'%')"
+
+      - name: 提交数据
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add margin-risk.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: 更新融资盘维保数据 $(date -u +%Y-%m-%d) [skip ci]"
+            git pull --rebase --autostash origin ${GITHUB_REF_NAME} || true
+            git push || (sleep 5 && git pull --rebase --autostash origin ${GITHUB_REF_NAME} && git push)
+          else
+            echo "数据无变化，跳过提交"
+          fi
+
+      - name: 刷新 CDN 缓存
+        run: |
+          curl -s "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@${GITHUB_REF_NAME}/margin-risk.json" || true
