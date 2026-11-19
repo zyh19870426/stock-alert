@@ -27,6 +27,9 @@ jobs:
           node-version: '20'
 
       - name: 生成融资盘维保数据
+        # 境外 GitHub 访问新浪不通，直接指定东财 push2his（与 margin-regime.js 同源，云端已验证）
+        env:
+          KLINE_SRC: em
         run: node build-data.js --conc 12
 
       - name: 校验产物
