@@ -2,15 +2,18 @@
 /**
  * 融资盘平仓风险日报 - 数据生成脚本
  *
- * 数据源（全部公开）：
- *  - 东财 datacenter-web RPTA_WEB_RZRQ_GGMX ：个股融资余额明细（T+1 披露）
+ * 数据源（全部公开，统一走 datacenter-web，本机/境外云端都稳定）：
+ *  - 东财 datacenter-web RPTA_WEB_RZRQ_GGMX ：个股融资余额明细（T+1 披露）+ 历史每日现价 SPJ
  *  - 东财 datacenter-web RPTA_RZRQ_LSHJ    ：市场级融资余额历史（近12交易日）
- *  - 腾讯 web.ifzq.gtimg.cn                 ：前复权日K（算 MA20 成本价）
- *  - 东财 push2 clist                       ：申万/东财一级行业映射
+ *
+ * ★ MA20 成本价的取法（v2，2026-11-19 重写）：
+ *   放弃逐只 K 线接口（新浪/东财 push2his 在云端均被限流，4491 只必超时）。
+ *   改为：按交易日批量拉全市场明细里的 SPJ（当日收盘价），20 个交易日 ≈ 180 次请求，
+ *   拼成每只股票的价格序列算 MA20。已与旧版逐位对账：中际旭创 MA20 514.44 / 维保 138.7% 一致。
  *
  * 维保比例口径（复刻原日报）：
  *   维保比例(%) = 180 × 现价 / 20日成本价
- *   其中 180 = 1.8 倍初始杠杆；成本价用前复权 MA20（原报告用融资买入额加权均价，差异约1%）
+ *   其中 180 = 1.8 倍初始杠杆；成本价用 MA20（原报告用融资买入额加权均价，差异约1%）
  *
  * 用法：node build-data.js [--days 25] [--limit 0] [--out margin-risk.json]
  */
@@ -29,10 +32,8 @@ const CONCURRENCY = ARGS.conc || 16;
 const LIMIT = ARGS.limit || 0;            // >0 时只处理前 N 只（调试用）
 
 const DC = 'https://datacenter-web.eastmoney.com/api/data/v1/get?';
-// 新浪日K（本地稳定、无WAF）：不复权，但现价与成本同比缩放，维保比值不受影响
-const SINA = 'https://quotes.sina.cn/cn/api/jsonp_v2.php/var%20k=/CN_MarketDataService.getKLineData?symbol=';
-// 东财 push2his 日K（境外 GitHub Actions 已验证可用，与现有 margin-regime.js 同源）
-const EMK = 'https://push2his.eastmoney.com/api/qt/stock/kline/get?';
+// MA20 成本价数据源：两融明细里的 SPJ（当日收盘价），按交易日批量取，单一稳定源
+const DC_COLS_PRICE = 'SCODE,SPJ';
 
 function parseArgs(a) {
   const o = {};
@@ -69,70 +70,86 @@ async function httpRetry(url, tries = 3, ms = 30000, withHeader = true) {
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// 新浪返回 JSONP: var k=([{day,open,high,low,close,volume},...]);  解析出数组
-function parseSina(out) {
-  const a = out.indexOf('([');
-  const b = out.lastIndexOf('])');
-  if (a < 0 || b < 0) return null;
-  try { return JSON.parse(out.slice(a + 1, b + 1)); }
-  catch (e) { return null; }
-}
-
-function httpText(url, timeoutMs = 20000) {
-  return new Promise((resolve, reject) => {
-    execFile('curl', ['-s', '--max-time', String(Math.ceil(timeoutMs / 1000)), '-A', 'Mozilla/5.0', url],
-      { maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' }, (err, stdout) => {
-        if (err) return reject(err);
-        resolve(stdout);
-      });
+// 取最近 N 个交易日（截至披露日，含披露日），返回 YYYY-MM-DD 数组（新→旧）
+async function tradingDays(tradeDate, n) {
+  const url = DC + qstr({
+    reportName: 'RPTA_RZRQ_LSHJ', columns: 'DIM_DATE',
+    source: 'WEB', client: 'WEB', sortColumns: 'DIM_DATE', sortTypes: -1,
+    pageSize: n + 5, pageNumber: 1
   });
-}
-
-async function sinaKline(code, days, tries = 3) {
-  const sym = secidOf(code); // sh/sz/bj + code
-  const url = SINA + sym + '&scale=240&ma=no&datalen=' + days;
-  let last;
-  for (let t = 0; t < tries; t++) {
+  let j;
+  for (let t = 0; t < 4; t++) {
     try {
-      const txt = await httpText(url, 20000);
-      const arr = parseSina(txt);
-      if (arr && arr.length) return arr;
-      last = new Error('empty kline');
-    } catch (e) { last = e; }
-    await sleep(300 * (t + 1));
+      j = await httpJson(url, 30000, false);
+      if (j && j.result && j.result.data && j.result.data.length) break;
+    } catch (e) { }
+    await sleep(500 * (t + 1));
   }
-  throw last;
+  if (!j || !j.result || !j.result.data) throw new Error('交易日列表获取失败');
+  return j.result.data
+    .map(x => x.DIM_DATE.slice(0, 10).replace(/-/g, ''))
+    .filter(d => d <= tradeDate)
+    .slice(0, n);
 }
 
-// 东财 push2his 日K：secid = 1.(沪) / 0.(深京)；fields2 f51日期 f53收盘
-// 返回与新浪统一格式 [{day:'YYYY-MM-DD', close:'..'}, ...]
-async function emKline(code, days, tries = 2) {
-  const secid = (/^(6|9)/.test(code) ? '1.' : '0.') + code;
-  const url = EMK + qstr({
-    secid, fields1: 'f1,f2,f3', fields2: 'f51,f53',
-    klt: '101', fqt: '1', lmt: String(days), end: '20500101'
+// 按单个交易日批量拉全市场 SPJ（收盘价），分页；返回 {SCODE: price}
+async function priceOfDay(d, tries = 3) {
+  const disp = d.slice(0, 4) + '-' + d.slice(4, 6) + '-' + d.slice(6);
+  const base = {
+    reportName: 'RPTA_WEB_RZRQ_GGMX', columns: DC_COLS_PRICE,
+    filter: `(DATE='${disp}')`, source: 'WEB', client: 'WEB',
+    sortColumns: 'SCODE', sortTypes: 1, pageSize: 500
+  };
+  let first;
+  for (let t = 0; t < tries; t++) {
+    try { first = await httpJson(DC + qstr(Object.assign({ pageNumber: 1 }, base)), 30000, false); if (first && first.result) break; }
+    catch (e) { await sleep(400 * (t + 1)); }
+  }
+  if (!first || !first.result) throw new Error('price day failed ' + disp);
+  const map = {};
+  const put = rows => rows.forEach(r => { const p = Number(r.SPJ); if (r.SCODE && p > 0) map[r.SCODE] = p; });
+  put(first.result.data);
+  const pages = first.result.pages || 1;
+  for (let p = 2; p <= pages; p++) {
+    let j;
+    for (let t = 0; t < tries; t++) {
+      try { j = await httpJson(DC + qstr(Object.assign({ pageNumber: p }, base)), 30000, false); if (j && j.result) break; }
+      catch (e) { await sleep(400 * (t + 1)); }
+    }
+    if (!j || !j.result) continue; // 某页失败就跳过该页，其它日照常算
+    put(j.result.data);
+  }
+  return map;
+}
+
+// 构建全市场 MA20：按交易日并发拉价，拼每只股票的价格序列
+// 返回 { code: {ma20, close, days} }
+async function buildMA20(tradeDate, days) {
+  const dlist = await tradingDays(tradeDate, days);
+  console.error('  取价交易日:', dlist.length, '天 (' + dlist[dlist.length - 1] + ' ~ ' + dlist[0] + ')');
+  // code -> {date:price}
+  const series = {};
+  const dayMaps = await pool(dlist, 6, async d => {
+    try { return await priceOfDay(d, 3); }
+    catch (e) { console.error('  取价失败', d, e.message.slice(0, 40)); return {}; }
   });
-  let last;
-  for (let t = 0; t < tries; t++) {
-    try {
-      const j = await httpJson(url, 20000, false);
-      const ks = j && j.data && j.data.klines;
-      if (ks && ks.length) return ks.map(s => { const p = s.split(','); return { day: p[0], close: p[1] }; });
-      last = new Error('empty em kline');
-    } catch (e) { last = e; }
-    await sleep(300 * (t + 1));
-  }
-  throw last;
-}
-
-// K线源选择：本地默认新浪（快），云端用 KLINE_SRC=em 直接走东财 push2his
-// 境外 GitHub 访问新浪不通，若"新浪优先"会每只空等超时，4491 只必然超时
-const KLINE_SRC = process.env.KLINE_SRC || 'auto';
-async function kline(code, days) {
-  if (KLINE_SRC === 'em') return await emKline(code, days, 3);
-  if (KLINE_SRC === 'sina') return await sinaKline(code, days, 3);
-  try { return await sinaKline(code, days, 2); }
-  catch (e) { return await emKline(code, days, 2); }
+  dayMaps.forEach((map, idx) => {
+    const d = dlist[idx];
+    Object.keys(map).forEach(code => {
+      if (!series[code]) series[code] = {};
+      series[code][d] = map[code];
+    });
+  });
+  const out = {};
+  Object.keys(series).forEach(code => {
+    const entries = Object.entries(series[code]).sort((a, b) => a[0].localeCompare(b[0])); // 升序
+    if (entries.length < 5) return;
+    const use = entries.slice(-20);
+    const ma20 = use.reduce((s, x) => s + x[1], 0) / use.length;
+    out[code] = { ma20, close: use[use.length - 1][1], days: use.length, kd: use[use.length - 1][0] };
+  });
+  console.error('  价格序列覆盖:', Object.keys(out).length, '只');
+  return out;
 }
 
 function qstr(obj) {
@@ -153,12 +170,6 @@ async function pool(items, size, worker) {
   }
   await Promise.all(Array.from({ length: Math.min(size, items.length) }, run));
   return ret;
-}
-
-function secidOf(code) {
-  if (/^(6|9)/.test(code)) return 'sh' + code;
-  if (/^(8|4)/.test(code)) return 'bj' + code;
-  return 'sz' + code;
 }
 
 function riskLevel(wb) {
@@ -222,20 +233,12 @@ function median(arr) {
     date: x.DIM_DATE.slice(0, 10), rzye: x.RZYE, rzmre: x.RZMRE, rzjme: x.RZJME
   })).slice(-12);
 
-  console.error('[5/6] 拉日K线算 MA20 成本（新浪源，失败转东财）...');
-  const klines = await pool(stocks, CONCURRENCY, async (s) => {
-    const arr = await kline(s.SCODE, KLINE_DAYS);
-    // 只取到披露日（含）为止，保证股价与两融口径同日
-    const upto = arr.filter(row => row.day.replace(/-/g, '') <= tradeDate);
-    if (upto.length < 5) return null;
-    const last20 = upto.slice(-20);
-    const ma20 = last20.reduce((a, r) => a + parseFloat(r.close), 0) / last20.length;
-    const close = parseFloat(upto[upto.length - 1].close);
-    return { ma20, close, kd: upto[upto.length - 1].day };
-  });
+  console.error('[5/6] 用两融明细历史价格算 MA20 成本（批量取价，单一稳定源）...');
+  const maMap = await buildMA20(tradeDate, KLINE_DAYS);
+  const klines = stocks.map(s => maMap[s.SCODE] || null);
   const kOk = klines.filter(Boolean).length;
-  console.error(`  K线成功 ${kOk}/${stocks.length}`);
-  if (kOk < stocks.length * 0.85) console.error('  ⚠ K线成功率偏低，维保样本会不完整');
+  console.error(`  MA20覆盖 ${kOk}/${stocks.length}`);
+  if (kOk < stocks.length * 0.85) console.error('  ⚠ MA20覆盖率偏低，维保样本会不完整');
 
   console.error('[6/6] 计算维保比例与聚合 ...');
   const rows = [];
