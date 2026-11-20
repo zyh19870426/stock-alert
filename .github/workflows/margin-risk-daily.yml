@@ -1,11 +1,16 @@
 name: margin-risk-daily 融资盘维保日报数据刷新
 
-# 每交易日北京时间 16:35 重算融资盘维保数据（两融 T+1 披露，盘后更新）
-# UTC 08:35 = 北京 16:35（错开 margin-daily 的 16:20，避免抢同一分钟）
-# 产物 margin-risk.json 推到仓库根目录 → jsDelivr CDN 自动分发 → 日报网页直读 CDN
+# 每交易日多次重算融资盘维保数据（两融 T+1 披露，早上就能查到）
+# GitHub schedule 高峰期常延迟数小时，故一天布 4 个点互相兜底：
+#   UTC 01:35 / 05:35 / 08:35 / 11:35 = 北京 09:35 / 13:35 / 16:35 / 19:35
+# 脚本按"东财最新披露日"取数，重复跑不会写坏数据；无变化则不提交。
+# 产物 margin-risk.json 推到仓库根目录 → 前端直读 raw / CDN。
 on:
   schedule:
+    - cron: '35 1 * * 1-5'
+    - cron: '35 5 * * 1-5'
     - cron: '35 8 * * 1-5'
+    - cron: '35 11 * * 1-5'
   workflow_dispatch:
 
 permissions:
