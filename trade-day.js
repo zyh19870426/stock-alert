@@ -46,8 +46,7 @@ async function getJSONFast(url) {
 /* 信号 A：最近 n 个交易日（YYYY-MM-DD 数组，升序）；失败返回 null */
 async function fetchTradingDates(n) {
   try {
-    const j = await getJSONFast('https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh000985,day,,,' +
-      (n + 10) + ',qfq')
+    const j = await require('./kline-source.js').fetchKlineJson('sh000985', n + 10)
     const key = j.data && Object.keys(j.data)[0]
     const raw = j.data && j.data[key] && (j.data[key].qfqday || j.data[key].day)
     if (!raw || !raw.length) return null

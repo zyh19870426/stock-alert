@@ -42,7 +42,7 @@ const DIR = __dirname
 const HIST_PATH = path.join(DIR, 'fng-history.json')
 const CONFIG_PATH = path.join(DIR, 'config.json')
 
-const TENCENT = 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get'
+const TENCENT = 'https://ifzq.gtimg.cn/appstock/app/fqkline/get'
 const SYMBOL = 'sh000985'                       // 中证全指：覆盖沪深全部 A 股，最适合代表大盘
 const DC = 'https://datacenter-web.eastmoney.com/api/data/v1/get'
 const REPORT_NAME = 'RPTA_RZRQ_LSHJ'            // 沪深两市融资融券历史汇总（T+1 披露）
@@ -82,8 +82,8 @@ async function fetchJson(url, tries) {
 
 /** 中证全指日线：返回 [{d,o,c,h,l,v}] 升序 */
 async function fetchKline() {
-  const url = TENCENT + '?param=' + SYMBOL + ',day,,,' + FETCH_KLINE + ',qfq&_=' + Date.now()
-  const j = await fetchJson(url)
+  /* ★ 2026-11-23：腾讯 ifzq 双域名均被 WAF 501 ⇒ 改走多源模块（按数据末日选胜） */
+  const j = await require('./kline-source.js').fetchKlineJson(SYMBOL, FETCH_KLINE)
   const node = j && j.data && j.data[SYMBOL]
   if (!node) throw new Error('腾讯 K 线返回结构异常')
   const rows = node.day || node.qfqday || node.qfq_day

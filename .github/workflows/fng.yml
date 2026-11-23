@@ -54,6 +54,10 @@ jobs:
             echo "存档无变化"
           fi
 
+      # ★ 2026-11-23：存档陈旧即报红（杜绝闸门跳过 / 数据源被封造成的静默停更）
+      - name: Verify archive freshness
+        run: node check-freshness.js fng-history.json days 1
+
       # 提交成功后清 jsDelivr 分支缓存（@main 约 12h）—— 否则控制台的 jsDelivr 兜底源会长时间返回昨日旧档
       - name: Purge jsDelivr cache
         run: |

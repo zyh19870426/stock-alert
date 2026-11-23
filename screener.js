@@ -225,8 +225,8 @@ async function fetchQuotes(codes) {
 
 /** 腾讯日线（结构与均线用） */
 async function fetchBars(code) {
-  const secid = (String(code)[0] === '6' ? 'sh' : 'sz') + code
-  const j = await getJson('https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=' + secid + ',day,,,130,qfq')
+  const sym = (String(code)[0] === '6' ? 'sh' : 'sz') + code
+  const j = await require('./kline-source.js').fetchKlineJson(sym, 130)
   const key = j.data && Object.keys(j.data)[0]
   const raw = j.data[key] && (j.data[key].qfqday || j.data[key].day)
   return raw ? S.normBars(raw) : null
@@ -238,7 +238,7 @@ async function fetchBars(code) {
  *     fetchTradingDates 静默返回 null，情绪周期在生产上一直拿不到日历。 */
 async function fetchTradingDates(n) {
   try {
-    const j = await getJson('https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh000985,day,,,' + (n + 10) + ',qfq')
+    const j = await require('./kline-source.js').fetchKlineJson('sh000985', n + 10)
     const key = j.data && Object.keys(j.data)[0]
     const raw = j.data[key] && (j.data[key].qfqday || j.data[key].day)
     if (!raw) return null

@@ -69,9 +69,8 @@ function loadHist() {
 async function fetchBars(code) {
   const c = String(code)
   if (!/^(60|00|30)/.test(c)) return null            // 只认沪深 A（688 属 60 开头，包含在内）
-  const secid = (c[0] === '6' ? 'sh' : 'sz') + c
-  const url = 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=' + secid + ',day,,,130,qfq'
-  const j = await fetchJson(url)
+  const sym = (c[0] === '6' ? 'sh' : 'sz') + c
+  const j = await require('./kline-source.js').fetchKlineJson(sym, 130)
   const key = j && j.data && Object.keys(j.data)[0]
   const raw = j && j.data && j.data[key] && (j.data[key].qfqday || j.data[key].day)
   return raw ? S.normBars(raw) : null

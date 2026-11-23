@@ -17,7 +17,7 @@
  *   手机端只负责一件小事：用腾讯日线（支持跨域）本地算「5 日线连续站上天数」。
  *
  *  数据源与降级（本机网络实测结论，见 _recon/chip-probe*.js）：
- *   日线    腾讯 web.ifzq.gtimg.cn        仅此一家（CORS 开放，手机也能取）
+ *   日线    腾讯 ifzq.gtimg.cn        仅此一家（CORS 开放，手机也能取）
  *   资金流  东财 push2his/fflow/kline  →  新浪 MoneyFlow.ssl_qsfx_zjlrqs
  *            · 东财口径明确：日期,主力,小单,中单,大单,超大单（已做字段闭合校验）
  *            · 新浪只有「主力净额 netamount」与「超大单净额 r0_net」，
@@ -96,8 +96,7 @@ async function fetchBars(code) {
   const c = String(code)
   if (!/^(60|00|30)/.test(c)) return null
   const sym = (c[0] === '6' ? 'sh' : 'sz') + c
-  const url = 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=' + sym + ',day,,,' + BARS_N + ',qfq'
-  const j = await fetchJson(url, 20000)
+  const j = await require('./kline-source.js').fetchKlineJson(sym, BARS_N)
   const key = j && j.data && Object.keys(j.data)[0]
   const raw = j && j.data && j.data[key] && (j.data[key].qfqday || j.data[key].day)
   return raw ? S.normBars(raw) : null

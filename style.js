@@ -105,7 +105,7 @@ const IDX = {
 
 /** 腾讯指数日线 → normBars 对象数组（screener.fetchBars 只认 6 位股票代码，指数单独写） */
 async function fetchIndexBars(code, n) {
-  const j = await SC.getJson('https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=' + code + ',day,,' + ',' + (n + 5) + ',qfq')
+  const j = await require('./kline-source.js').fetchKlineJson(code, n + 5)
   const key = j.data && Object.keys(j.data)[0]
   const raw = j.data[key] && (j.data[key].qfqday || j.data[key].day)
   if (!raw || raw.length < n) return null

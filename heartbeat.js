@@ -35,7 +35,7 @@ const CONFIG_PATH = path.join(DIR, 'config.json')
 const REPO = process.env.GITHUB_REPOSITORY || 'zyh19870426/stock-alert'
 const TOKEN = process.env.GITHUB_TOKEN || ''
 const API = 'https://api.github.com/repos/' + REPO
-const TENCENT = 'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get'
+const TENCENT = 'https://ifzq.gtimg.cn/appstock/app/fqkline/get'
 
 const args = process.argv
 const FORCE = args.includes('--force')
@@ -76,8 +76,7 @@ function loadJson(p) {
 
 /** 今天是不是 A 股交易日：看中证全指日线里有没有"今天"这根 K */
 async function isTradingDay(today) {
-  const url = TENCENT + '?param=sh000985,day,,,5,qfq&_=' + Date.now()
-  const j = await fetchJson(url)
+  const j = await require('./kline-source.js').fetchKlineJson('sh000985', 5)
   const node = j && j.data && j.data.sh000985
   const rows = node && (node.day || node.qfqday || node.qfq_day)
   if (!Array.isArray(rows) || !rows.length) throw new Error('取不到中证全指日线，无法判断交易日')
