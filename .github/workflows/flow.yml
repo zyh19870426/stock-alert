@@ -50,6 +50,25 @@ jobs:
             echo "存档无变化"
           fi
 
+      # ★ 2026-11-23：闸门跳过时此前 workflow 仍显示 success（13 秒空跑），数据静默停更 17 天无人发现。
+      #   存档日落后行情日即判失败，让「跳过」显式报红，不再假成功。
+      - name: Verify archive freshness
+        run: |
+          node -e "
+          const TD = require('./trade-day.js');
+          const j = require('./flow-history.json');
+          (async () => {
+            const g = await TD.gate();
+            const q = g.qDate ? g.qDate.slice(0,4)+'-'+g.qDate.slice(4,6)+'-'+g.qDate.slice(6,8) : null;
+            const last = (j.days && j.days.length) ? j.days[j.days.length-1].d : '';
+            console.log('存档日 ' + last + ' / 行情日 ' + (q||'?') + ' / 日历日 ' + (g.lastCal||'?'));
+            if (!last || (q && last < q)) {
+              console.error('存档落后于行情日 → 判失败（闸门跳过必须显式报红）');
+              process.exit(1);
+            }
+          })().catch(e => { console.error(e.message); process.exit(1); });
+          "
+
       # 提交成功后清 jsDelivr 分支缓存（@main 约 12h）—— 否则控制台的 jsDelivr 兜底源会长时间返回昨日旧档
       - name: Purge jsDelivr cache
         run: |
