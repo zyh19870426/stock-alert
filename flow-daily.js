@@ -60,12 +60,13 @@ function outOfBudget() { return leftMs() <= 0 }
  *   · https.get 同样会 ECONNRESET（限流与传输无关），但**带 timeout 后不会挂死**；
  *   · 三个域名 push2 / push2delay / push2his 共享同一风控，只能当**回退通道**，
  *     不能靠换域名突破限流 —— 真正的解药是**降频 + 退避 + 记忆上次成功的通道**。
- * ⇒ 传输方式 [https.get, fetch] × 域名 [test, delay, push2, his]，按上次成功通道优先。
- * ★ 2026-10-10：主域名 push2 被东财【域名+路径】级风控标记（clist 直接 000），
- *   实测 push2test.eastmoney.com 同路径稳定 200 → 提到首位（换域名即破，不需换 IP）。 */
-const EM_HOSTS = ['push2test.eastmoney.com', 'push2delay.eastmoney.com', 'push2.eastmoney.com', 'push2his.eastmoney.com']
+ * ⇒ 传输方式 [https.get, fetch] × 域名 [delay, push2, his]，按上次成功通道优先。
+ * ★ 2026-11-23：push2test 除名——它是东财【测试环境】，快照部分冻结在旧数据
+ *   （实测海康威视冻结在 +10.01% 的历史涨停日，板块 clist 也缺当日新入榜个股），
+ *   拿它当首位会把旧快照写进当日存档。首位改 push2delay，其余仍作回退。 */
+const EM_HOSTS = ['push2delay.eastmoney.com', 'push2.eastmoney.com', 'push2his.eastmoney.com']
 const EM_METHODS = ['https', 'fetch']
-var EM_CHAN = { m: 'https', h: 'push2test.eastmoney.com' }
+var EM_CHAN = { m: 'https', h: 'push2delay.eastmoney.com' }
 const wait = ms => new Promise(r => setTimeout(r, ms))
 
 /* ★ emSwap 只替换「可互换」的行情域名（test/delay/his 上 clist·fflow·stock/get 均可互换）；
@@ -602,18 +603,28 @@ async function buildMonthIncremental(names, type, monthPrefix, days, tradeDates,
 }
 
 async function main() {
-  const t = bjToday()
-  const monthPrefix = t.slice(0, 7)
-  /* 交易日闸门：非交易日直接退出（不写盘）——cron 是工作日制，不认 A 股节假日
-   * （国庆假期 2026-10-01~10-07 每次都跑、都超时取消；侥幸跑通会写脏数据）
-   * 判定逻辑见 trade-day.js（双信号取「或」，防单接口滞后误跳过） */
-  const g = await TD.gate(t)
+  const bj = bjToday()
+  /* 交易日闸门：非交易日直接退出（不写盘）——cron 是工作日制，不认 A 股节假日。
+   * ★ 2026-11-23 根因修复：原代码用「北京自然日」当数据日 + 判定日，但 Actions 调度
+   *   延迟常跨到次日凌晨（实测 11-20 的 run 在北京 11-21 00:55 才跑）：拿到 11-20 的
+   *   行情/日历，判定日却是 11-21 ⇒ 误判「非交易日」跳过，存档从 11-06 起停更 17 天。
+   *   改为以【行情数据日】为准：qDate(行情戳) 与 lastCal(日线日历) 取较新者，
+   *   用它判定 + 写盘；任一信号存在即按该信号日判定，两个都没有才 fail-open。 */
+  const g = await TD.gate()
   const tradeDates = g.dates
-  if (g.isTrading === false) {
-    console.log('非交易日（' + TD.describe(g) + '）→ 跳过，不写盘')
+  const qDay = g.qDate ? (g.qDate.slice(0,4) + '-' + g.qDate.slice(4,6) + '-' + g.qDate.slice(6,8)) : null
+  const dataDay = (qDay && g.lastCal && qDay > g.lastCal) ? qDay : (g.lastCal || qDay || bj)
+  const hasSignal = !!(g.lastCal || qDay)
+  const tradingOK = hasSignal ? (dataDay === g.lastCal || dataDay === qDay) : null
+  if (tradingOK === false) {
+    console.log('非交易日（交易日历最新 ' + (g.lastCal || '?') + '，行情时间戳 ' + (g.qDate || '?') +
+      '，数据日 ' + dataDay + '）→ 跳过，不写盘')
     return
   }
-  if (g.isTrading === null) console.log('⚠️ 交易日历与行情时间戳都取不到（' + TD.describe(g) + '），按原有流程继续')
+  if (tradingOK === null) console.log('⚠️ 交易日历与行情时间戳都取不到（' + TD.describe(g) + '），按原有流程继续')
+  const t = dataDay
+  const monthPrefix = t.slice(0, 7)
+  console.log('数据日 ' + t + '（北京自然日 ' + bj + '，行情戳 ' + (g.qDate || '?') + '，日历最新 ' + (g.lastCal || '?') + '）')
   /* 行业/概念独立容错：一侧全挂也保留另一侧，避免「一次 502 → 当日整档丢失」。
    * 两侧全挂才抛错（这是真故障，必须让 workflow 报红以便发现）。 */
   let ind = {}, con = {}, eInd = null, eCon = null
