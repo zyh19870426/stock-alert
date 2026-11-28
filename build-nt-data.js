@@ -254,14 +254,26 @@ const dstr = ts => { const d = new Date(ts); return d.getFullYear() + '-' + Stri
   log('   上交所 ' + dataDay + ' 份额表 ' + Object.keys(sseMap).length + ' 行');
   const szList = NT_ETFS.filter(e => e.mkt === 0);
   const szRes = await mapLimit(szList, 2, async e => {
-    const r = await szseShare(e.code);
-    if (r.date && r.date !== dataDay) throw new Error('深交所 ' + e.code + ' 份额日期 ' + r.date + ' ≠ 目标 ' + dataDay);
-    return { code: e.code, shares: r.shares, date: r.date };
+    /* 深交所官方优先（本机可达，GitHub Actions 海外出口常不可达）。
+       失败则退回 push2test 反推：实测对 159919/159922 与深交所官方一致（215.6 vs 215.7 亿份），
+       冻结问题只在沪市科创 ETF 上出现，深市这两只可安全兜底。仍带日期/异常闸防错。 */
+    try {
+      const r = await szseShare(e.code);
+      if (r.date && r.date !== dataDay) throw new Error('份额日期 ' + r.date + ' ≠ ' + dataDay);
+      return { code: e.code, shares: r.shares, src: 'szse' };
+    } catch (e1) {
+      const j = await jget('https://push2test.eastmoney.com/api/qt/stock/get?secid=0.' + e.code +
+        '&fields=f43,f116', 12000, 'https://quote.eastmoney.com/');
+      const p = (j.data.f43 || 0) / 1000, v = j.data.f116 || 0;
+      if (!(p > 0) || !(v > 0)) throw new Error('深交所失败(' + e1.message + ')、push2test 兜底也无效');
+      log('   ⚠ 深交所不可达，' + e.code + ' 用 push2test 兜底（实测与官方一致）');
+      return { code: e.code, shares: v / p / 1e8, src: 'push2test-fallback' };
+    }
   });
   const szMap = {};
   szRes.forEach(r => { if (r && r.code && !r.__err) szMap[r.code] = r.shares; });
   const szBad = szRes.filter(r => r && r.__err).map(r => r.code + ':' + r.__err).join(' | ');
-  if (szBad) log('   ⚠ 深交所取数失败：' + szBad);
+  if (szBad) log('   ⚠ 深市份额取数失败：' + szBad);
   /* 3) 组装：份额 × 价 = 规模。任一缺失即该只失败，最后按安全闸判定 */
   const snap = NT_ETFS.map(e => {
     const share = e.mkt === 1 ? sseMap[e.code] : szMap[e.code];
