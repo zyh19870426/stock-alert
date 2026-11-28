@@ -12,8 +12,10 @@
  * 数据源（均已实测校准）：
  *  A. ETF 季度  : fundf10.eastmoney.com/FundArchivesDatas.aspx?type=gmbd&code={code}
  *                ⇒ 期末总份额(亿份)/期间申购/期间赎回/期末净资产(亿元)，2012 起（定期报告口径）
- *  B. ETF 当日  : push2test stock/get f116(规模=份额×价) + f43(价)
- *                ⇒ 与深交所 SZSE dqgm 官方值已交叉校准一致（159919: 107.6 亿份 ✓）
+ *  B. ETF 当日  : ★2026-11-28 根治——交易所官方日频份额 + qt 报价
+ *                沪市=上交所 commonQuery(STAT_DATE 支持历史)，深市=深交所 1945(仅最新日)，
+ *                规模=份额×qt价。旧 push2test f116/f43 反推份额是冻结快照，11-27
+ *                把 588000 算成 878 亿份(官方 1030.71)、伪造「科创减 300 亿」，已弃用。
  *  C. 季报持股  : datacenter-web RPT_F10_EH_FREEHOLDERS（HOLDER_NAME ∈ 国家队名单，END_DATE 倒序翻页）
  *                ⇒ HOLDER_MARKET_CAP(万元)/HOLD_NUM_CHANGE（十大流通股东披露口径，仅前十、滞后）
  *  D. 股→行业   : push2test clist m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23 fields=f100（5563 只一次拿全）
@@ -25,6 +27,7 @@
  * 用法: node _tests/build-nt-data.js
  */
 const https = require('https');
+const http = require('http');   /* 深交所 1945 仅 http（https 在本机被重置），get() 按协议分流 */
 const fs = require('fs');
 const path = require('path');
 const { TextDecoder } = require('util');
@@ -92,7 +95,8 @@ const SECTOR_RULES = [
 
 function get(url, timeout, ref) {
   return new Promise((r, rej) => {
-    const q = https.get(url, { timeout: timeout || 15000, headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Referer': ref || 'https://fundf10.eastmoney.com/' } }, res => {
+    const mod = /^https:\/\//i.test(url) ? https : http;
+    const q = mod.get(url, { timeout: timeout || 15000, headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Referer': ref || 'https://fundf10.eastmoney.com/' } }, res => {
       const c = []; res.on('data', d => c.push(d));
       res.on('end', () => {
         const buf = Buffer.concat(c);
@@ -103,6 +107,42 @@ function get(url, timeout, ref) {
   });
 }
 function jget(url, timeout, ref) { return get(url, timeout, ref).then(r => { if (r.s !== 200) throw new Error('HTTP ' + r.s); return JSON.parse(r.body); }); }
+
+/* ★2026-11-28 根治：ETF 份额改用【交易所官方日频份额】，弃用 push2test 冻结快照。
+ * 旧逻辑 shares = f116(规模) / f43(价)：push2test 是东财测试环境、快照部分冻结，
+ * 11-27 实测把 588000 份额算成 878.27 亿份（上交所官方 1030.71），凭空造出
+ * 「科创单日净赎回 300 亿」的假象。份额必须从交易所权威口径直接取，不许反推。
+ *   · 沪市 8 只：上交所 commonQuery，STAT_DATE 支持任意历史交易日（TOT_VOL 单位=万份）
+ *   · 深市 2 只：深交所 ShowReport CATALOGID=1945，只给最新交易日（dqgm 单位=万份）
+ *     返回 metadata.subname 必须 === 目标 dataDay，否则视为口径不符、拒写（显式报状态）。 */
+async function sseShareMap(dateStr) {
+  const url = 'https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L' +
+    '&isPagination=true&pageHelp.pageSize=2000&pageHelp.pageNo=1' +
+    '&pageHelp.beginPage=1&pageHelp.cacheSize=1&pageHelp.endPage=1&STAT_DATE=' + dateStr;
+  const j = await jget(url, 15000, 'http://www.sse.com.cn/');
+  const rows = (j.pageHelp && j.pageHelp.data) || [];
+  if (!rows.length) throw new Error('上交所 ' + dateStr + ' 无 ETF 份额数据');
+  const map = {};
+  for (const r of rows) {
+    const code = String(r.SEC_CODE || '').trim();
+    const vol = Number(r.TOT_VOL);
+    if (code && isFinite(vol)) map[code] = vol / 1e4; /* 万份 → 亿份 */
+  }
+  return map;
+}
+async function szseShare(code) {
+  const url = 'http://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1945' +
+    '&TABKEY=tab1&PAGENO=1&txtQueryKeyAndJC=' + code;
+  const j = await jget(url, 15000, 'http://www.szse.cn/market/fund/etf/');
+  const d = Array.isArray(j) ? j[0] : null;
+  const row = (d && d.data || [])[0];
+  if (!row) throw new Error('深交所无 ' + code + ' 份额');
+  const strip = s => String(s || '').replace(/<[^>]+>/g, '').trim();
+  if (strip(row.sys_key) !== code) throw new Error('深交所 ' + code + ' 代码不符：' + strip(row.sys_key));
+  const vol = Number(strip(row.dqgm).replace(/,/g, ''));
+  if (!isFinite(vol)) throw new Error('深交所 ' + code + ' dqgm 非法');
+  return { shares: vol / 1e4, date: d.metadata && d.metadata.subname ? String(d.metadata.subname).trim() : null };
+}
 async function mapLimit(arr, limit, fn) {
   const ret = new Array(arr.length); let i = 0;
   async function worker() { while (i < arr.length) { const k = i++; try { ret[k] = await fn(arr[k], k); } catch (e) { ret[k] = { __err: e.message }; } } }
@@ -190,37 +230,73 @@ const dstr = ts => { const d = new Date(ts); return d.getFullYear() + '-' + Stri
   log('   季度轴 ' + quarterly[0].endDate + ' → ' + qLast.endDate + '（' + quarterly.length + ' 期），最新净资产 ' + qLast.val + ' 亿 / 份额 ' + qLast.shares + ' 亿份');
   log('   篮子完整（' + fullN + ' 只全覆盖）起始于 ' + fullStart + '，此前各期覆盖只数递减，绝对值不可跨期直比');
 
-  /* ============ B. 当日快照（f116 规模 + f43 价 → 份额） ============
-     ★2026-11-28 修：push2test 的 f43 偶发返回 0（测试域名冻结/限流），
-     份额=规模/价 会整体变 0 ⇒ 触发安全闸拒写 ⇒ 档案连续停更。
-     加 qt.gtimg.cn 报价兜底：f43<=0 时用 qt 实时价（10 只一次拿全，实测 11-27 全可用）。 */
-  log('B. ETF 当日快照 (push2test f116 + qt 价格兜底)');
-  const pxFallback = {};
-  try {
-    const q = NT_ETFS.map(e => (e.mkt ? 'sh' : 'sz') + e.code).join(',');
-    const qr = await get('https://qt.gtimg.cn/q=' + q, 10000, 'https://qt.gtimg.cn/');
-    const re = /v_(s[hz]\d+)="([^"]*)"/g; let m;
-    while ((m = re.exec(qr.body))) {
-      const p = +m[2].split('~')[3];
-      if (p > 0) pxFallback[m[1].slice(2)] = p;
+  /* ============ B. 当日快照（交易所官方份额 + qt 价 → 规模） ============
+     ★2026-11-28 根治：份额从交易所权威口径直接取，不再用 push2test 反推。
+       沪市走上交所 commonQuery（支持历史 STAT_DATE），深市走深交所 1945（仅最新日），
+       价格走 qt.gtimg.cn（一次拿全 10 只）。份额单位统一=亿份，规模(元)=份额×价×1e8。 */
+  log('B. ETF 当日快照 (交易所官方份额 + qt 价)');
+  /* 1) 价格：qt 一次拿全 10 只 */
+  const px = {};
+  const q = NT_ETFS.map(e => (e.mkt ? 'sh' : 'sz') + e.code).join(',');
+  const qr = await get('https://qt.gtimg.cn/q=' + q, 10000, 'https://qt.gtimg.cn/');
+  const re = /v_(s[hz]\d+)="([^"]*)"/g; let m;
+  while ((m = re.exec(qr.body))) {
+    const p = +m[2].split('~')[3];
+    if (p > 0) px[m[1].slice(2)] = p;
+  }
+  if (Object.keys(px).length < NT_ETFS.length * 0.6) {
+    throw new Error('qt 报价仅 ' + Object.keys(px).length + '/' + NT_ETFS.length + ' 只，拒绝写份额（无法算规模）');
+  }
+  log('   qt 报价 ' + Object.keys(px).length + '/' + NT_ETFS.length + ' 只');
+  /* 2) 份额：沪市一次拿 SSE 全表，深市逐只查 SZSE（仅 2 只） */
+  const shCodes = NT_ETFS.filter(e => e.mkt === 1).map(e => e.code);
+  const sseMap = await sseShareMap(dataDay);
+  log('   上交所 ' + dataDay + ' 份额表 ' + Object.keys(sseMap).length + ' 行');
+  const szList = NT_ETFS.filter(e => e.mkt === 0);
+  const szRes = await mapLimit(szList, 2, async e => {
+    const r = await szseShare(e.code);
+    if (r.date && r.date !== dataDay) throw new Error('深交所 ' + e.code + ' 份额日期 ' + r.date + ' ≠ 目标 ' + dataDay);
+    return { code: e.code, shares: r.shares, date: r.date };
+  });
+  const szMap = {};
+  szRes.forEach(r => { if (r && r.code && !r.__err) szMap[r.code] = r.shares; });
+  const szBad = szRes.filter(r => r && r.__err).map(r => r.code + ':' + r.__err).join(' | ');
+  if (szBad) log('   ⚠ 深交所取数失败：' + szBad);
+  /* 3) 组装：份额 × 价 = 规模。任一缺失即该只失败，最后按安全闸判定 */
+  const snap = NT_ETFS.map(e => {
+    const share = e.mkt === 1 ? sseMap[e.code] : szMap[e.code];
+    const price = px[e.code];
+    if (!(share > 0) || !(price > 0)) {
+      return { code: e.code, name: e.name, __err: '份额=' + share + ' 价=' + price };
     }
-    log('   qt 价格兜底 ' + Object.keys(pxFallback).length + '/' + NT_ETFS.length + ' 只');
-  } catch (e) { log('   ⚠ qt 价格兜底不可用：' + e.message); }
-  const snap = await mapLimit(NT_ETFS, 5, async e => {
-    const j = await jget('https://push2test.eastmoney.com/api/qt/stock/get?secid=' + (e.mkt ? '1.' : '0.') + e.code + '&fields=f43,f116', 10000, 'https://quote.eastmoney.com/');
-    let price = (j.data.f43 || 0) / 1000; /* ETF 价 3 位小数 */
-    if (!(price > 0) && pxFallback[e.code] > 0) price = pxFallback[e.code];
-    const val = j.data.f116 || 0;
-    return { code: e.code, name: e.name, price: price, val: val, shares: price > 0 ? val / price / 1e8 : 0 };
+    const val = share * price * 1e8; /* 元 */
+    return { code: e.code, name: e.name, price: price, val: val, shares: share };
   });
   const snapOk = snap.filter(s => s.shares > 0);
-  /* ★安全闸（2026-11-17）：云端取数一旦整体失败（风控必须是显式报错，不能静默放行），
-     下面所有聚合都会变成 0，写回仓库就把页面变成全 0。这里直接 fail-fast，
-     workflow 因非 0 退出而不提交，仓库保留上一版好数据。 */
-  const MIN_SNAP = Math.ceil(NT_ETFS.length * 0.6);
-  if (snapOk.length < MIN_SNAP) {
-    const bad = snap.filter(s => s.__err).map(s => s.__err).slice(0, 3).join(' | ');
-    throw new Error('ETF 当日快照仅 ' + snapOk.length + '/' + NT_ETFS.length + ' 只成功（低于阈值 ' + MIN_SNAP + '），拒绝写出全 0 数据。样本错误: ' + bad);
+  /* ★安全闸：交易所份额是全仓真值，缺一只就会让篮子总和偏小、净申购虚高。
+     要求全部 10 只到手（比旧的 60% 更严）——交易所偶发抖动宁可拒写等次日重试，
+     也不能把残缺份额写进档案冒充完整篮子。 */
+  if (snapOk.length < NT_ETFS.length) {
+    const bad = snap.filter(s => s.__err).map(s => s.code + '(' + s.__err + ')').join(' | ');
+    throw new Error('交易所份额仅 ' + snapOk.length + '/' + NT_ETFS.length + ' 只成功，拒绝写残缺篮子。失败: ' + bad);
+  }
+  /* ★★份额异常闸（2026-11-28）：单只份额较上一档案日变动 >30% 视为口径异常/源错误，
+     显式报错拒写（不静默放行）。真实宽基 ETF 单日份额极少跳变 30%（除大额申赎），
+     这道闸专门拦「push2test 冻结快照/反推份额」这类源错误再次混进档案。 */
+  let prevDaily = { dates: [], shares: {} };
+  try { prevDaily = JSON.parse(fs.readFileSync(DAILY, 'utf8')); } catch (e) { }
+  if (prevDaily.dates && prevDaily.dates.length) {
+    const lastIdx = prevDaily.dates.length - 1;
+    const jumps = [];
+    snap.forEach(s => {
+      const arr = (prevDaily.shares || {})[s.code];
+      const prev = arr && arr[lastIdx];
+      if (prev > 0) {
+        const chg = (s.shares - prev) / prev;
+        if (Math.abs(chg) > 0.30) jumps.push(s.code + ' ' + prev.toFixed(1) + '→' + s.shares.toFixed(1) + ' (' + (chg * 100).toFixed(0) + '%)');
+      }
+    });
+    if (jumps.length) throw new Error('份额异常跳变 >30%，拒绝写入（疑似数据源口径错误）: ' + jumps.join(' | '));
   }
   const snapTotalShares = snapOk.reduce((s, x) => s + x.shares, 0);
   const snapTotalVal = snapOk.reduce((s, x) => s + x.val, 0) / 1e8;
@@ -232,15 +308,22 @@ const dstr = ts => { const d = new Date(ts); return d.getFullYear() + '-' + Stri
   let daily = { dates: [], shares: {}, val: {} };
   try { daily = JSON.parse(fs.readFileSync(DAILY, 'utf8')); } catch (e) { }
   let dailyDirty = false;
-  if (daily.dates[daily.dates.length - 1] !== dataDay) {
-    daily.dates.push(dataDay);
+  const lastIsTarget = daily.dates[daily.dates.length - 1] === dataDay;
+  /* NT_OVERWRITE_LAST=1：一次性修正末日（如 2026-11-28 回填 11-27 被 push2test 算错的份额）。
+     云端日更不设此环境变量 ⇒ 保持「已有则跳过」的幂等语义。 */
+  const overwrite = process.env.NT_OVERWRITE_LAST === '1' && lastIsTarget;
+  if (!lastIsTarget || overwrite) {
+    const idx = lastIsTarget ? daily.dates.length - 1 : daily.dates.length;
+    if (!lastIsTarget) daily.dates.push(dataDay);
     NT_ETFS.forEach(e => {
       const s = snapOk.find(x => x.code === e.code);
-      (daily.shares[e.code] = daily.shares[e.code] || []).push(s ? +s.shares.toFixed(2) : null);
-      (daily.val[e.code] = daily.val[e.code] || []).push(s ? +(s.val / 1e8).toFixed(1) : null);
+      if (!daily.shares[e.code]) daily.shares[e.code] = [];
+      if (!daily.val[e.code]) daily.val[e.code] = [];
+      daily.shares[e.code][idx] = s ? +s.shares.toFixed(2) : null;
+      daily.val[e.code][idx] = s ? +(s.val / 1e8).toFixed(1) : null;
     });
     dailyDirty = true;
-    log('   日频档案待追加 ' + dataDay + '（累计 ' + daily.dates.length + ' 天）');
+    log('   日频档案' + (overwrite ? '覆盖修正' : '待追加') + ' ' + dataDay + '（累计 ' + daily.dates.length + ' 天）');
   } else log('   日频档案已有 ' + dataDay + '，跳过');
 
   /* 本季至今净申购（当日份额 vs 上季末定期报告份额） */
@@ -403,7 +486,7 @@ const dstr = ts => { const d = new Date(ts); return d.getFullYear() + '-' + Stri
       quarterly: '季度规模源自基金定期报告（东财F10 gmbd）。netVal=当期(期间申购−期间赎回)×当期篮子均价=净申购金额（亿元，流量指标，不受篮子成员增减影响）；净申购份额为负=净赎回。n=当期覆盖ETF只数，n<10 的早期期次存量份额/净资产不可与后期直比',
       direct: '季报十大流通股东披露口径（仅前十、披露滞后），含汇金/证金/梧桐树/国新/诚通系；各账户取各自最新披露期：' + JSON.stringify(asOf),
       mktCap: '沪深总市值=沪(字段45)+深(字段45)，qt.gtimg.cn 实时口径',
-      daily: '日频档案 nt-daily.json 自 2026-10-29 起逐日累积（交易所日频份额历史已不可批量获取：上交所 403/深交所限流）',
+      daily: '日频档案 nt-daily.json 2026-11-28 根治：沪市8只用上交所官方日频份额(可回溯历史)、深市2只用深交所1945(仅最新日，历史份额保留旧采样)；规模=份额×当日收盘价。旧版 push2test 反推份额(冻结快照)已于 11-28 全历史回填修正',
       monthly: '月度净申购 = 当月末快照篮子总份额 − 上月末锚份额，× 期末均价。季末月的「上月末锚」直接取定期报告值（季末日即月末），非季末月取当月自采末快照 ⇒ 无插值。partial=当月未走完（读数随日更新）'
     },
     meta: { fullN: fullN, fullStart: fullStart },
