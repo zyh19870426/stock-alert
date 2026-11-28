@@ -121,16 +121,26 @@ const dstr = ts => { const d = new Date(ts); return d.getFullYear() + '-' + Stri
   const today = new Date(Date.now() + 8 * 3600e3);
   const todayStr = today.getUTCFullYear() + '-' + String(today.getUTCMonth() + 1).padStart(2, '0') + '-' + String(today.getUTCDate()).padStart(2, '0');
 
-  /* ★交易日闸门（复用 trade-day.js 单一真源）
-     GitHub cron 只认「工作日」，A股节假日照常触发。非交易日跑一次会往 nt-daily.json
-     追加一条"份额不变"的假记录，把日频曲线污染成一条假平线 ⇒ 非交易日直接退出
-     （不写盘、不产生 commit）。两个信号都取不到时 fail-open 继续，避免漏掉真实交易日。 */
+  /* ★交易日闸门（复用 trade-day.js 单一真源）—— 2026-11-28 修
+     旧逻辑：g.isTrading===false 直接 return。事故：cron('10 14 * * 1-5'=北京22:10)
+     在 GitHub 高负载时延迟到次日凌晨跑，脚本拿到的是「次日自然日」(周六/周日)，
+     闸门判非交易日直接跳过，连续 11-25/26/27 三天 workflow 全绿但档案没写盘。
+     新逻辑：以「行情数据日 qDate」为准。非交易日且行情日仍落后档案末日 ⇒ 跳过；
+     非交易日但行情日已前进(如周六补周五数据) ⇒ 继续，并用行情日作采样日期。
+     两个信号都取不到时 fail-open 继续，避免漏掉真实交易日。 */
+  var dataDay = todayStr;
   if (!process.env.SKIP_TRADE_GATE) {
     const TD = require('./trade-day.js');
     const g = await TD.gate();
-    if (g.isTrading === false) { log('非交易日（' + TD.describe(g) + '），跳过本次构建'); return; }
+    if (g.qDate && /^\d{8}$/.test(g.qDate)) {
+      dataDay = g.qDate.slice(0, 4) + '-' + g.qDate.slice(4, 6) + '-' + g.qDate.slice(6, 8);
+    }
+    if (g.isTrading === false && dataDay === todayStr) {
+      log('非交易日且行情日未前进（' + TD.describe(g) + '），跳过本次构建'); return;
+    }
+    if (g.isTrading === false) log('非交易日但行情日已到 ' + dataDay + '（cron 延迟补采），继续');
     if (g.isTrading === null) log('⚠ 交易日无法判定（' + TD.describe(g) + '），按 fail-open 继续');
-    else log('交易日确认 ' + g.t);
+    else if (g.isTrading) log('交易日确认 ' + g.t + '，行情日 ' + dataDay);
   }
 
   /* ============ A. ETF 季度规模（长历史 + 绝对持仓） ============ */
@@ -180,11 +190,26 @@ const dstr = ts => { const d = new Date(ts); return d.getFullYear() + '-' + Stri
   log('   季度轴 ' + quarterly[0].endDate + ' → ' + qLast.endDate + '（' + quarterly.length + ' 期），最新净资产 ' + qLast.val + ' 亿 / 份额 ' + qLast.shares + ' 亿份');
   log('   篮子完整（' + fullN + ' 只全覆盖）起始于 ' + fullStart + '，此前各期覆盖只数递减，绝对值不可跨期直比');
 
-  /* ============ B. 当日快照（f116 规模 + f43 价 → 份额） ============ */
-  log('B. ETF 当日快照 (push2test f116)');
+  /* ============ B. 当日快照（f116 规模 + f43 价 → 份额） ============
+     ★2026-11-28 修：push2test 的 f43 偶发返回 0（测试域名冻结/限流），
+     份额=规模/价 会整体变 0 ⇒ 触发安全闸拒写 ⇒ 档案连续停更。
+     加 qt.gtimg.cn 报价兜底：f43<=0 时用 qt 实时价（10 只一次拿全，实测 11-27 全可用）。 */
+  log('B. ETF 当日快照 (push2test f116 + qt 价格兜底)');
+  const pxFallback = {};
+  try {
+    const q = NT_ETFS.map(e => (e.mkt ? 'sh' : 'sz') + e.code).join(',');
+    const qr = await get('https://qt.gtimg.cn/q=' + q, 10000, 'https://qt.gtimg.cn/');
+    const re = /v_(s[hz]\d+)="([^"]*)"/g; let m;
+    while ((m = re.exec(qr.body))) {
+      const p = +m[2].split('~')[3];
+      if (p > 0) pxFallback[m[1].slice(2)] = p;
+    }
+    log('   qt 价格兜底 ' + Object.keys(pxFallback).length + '/' + NT_ETFS.length + ' 只');
+  } catch (e) { log('   ⚠ qt 价格兜底不可用：' + e.message); }
   const snap = await mapLimit(NT_ETFS, 5, async e => {
     const j = await jget('https://push2test.eastmoney.com/api/qt/stock/get?secid=' + (e.mkt ? '1.' : '0.') + e.code + '&fields=f43,f116', 10000, 'https://quote.eastmoney.com/');
-    const price = (j.data.f43 || 0) / 1000; /* ETF 价 3 位小数 */
+    let price = (j.data.f43 || 0) / 1000; /* ETF 价 3 位小数 */
+    if (!(price > 0) && pxFallback[e.code] > 0) price = pxFallback[e.code];
     const val = j.data.f116 || 0;
     return { code: e.code, name: e.name, price: price, val: val, shares: price > 0 ? val / price / 1e8 : 0 };
   });
@@ -207,16 +232,16 @@ const dstr = ts => { const d = new Date(ts); return d.getFullYear() + '-' + Stri
   let daily = { dates: [], shares: {}, val: {} };
   try { daily = JSON.parse(fs.readFileSync(DAILY, 'utf8')); } catch (e) { }
   let dailyDirty = false;
-  if (daily.dates[daily.dates.length - 1] !== todayStr) {
-    daily.dates.push(todayStr);
+  if (daily.dates[daily.dates.length - 1] !== dataDay) {
+    daily.dates.push(dataDay);
     NT_ETFS.forEach(e => {
       const s = snapOk.find(x => x.code === e.code);
       (daily.shares[e.code] = daily.shares[e.code] || []).push(s ? +s.shares.toFixed(2) : null);
       (daily.val[e.code] = daily.val[e.code] || []).push(s ? +(s.val / 1e8).toFixed(1) : null);
     });
     dailyDirty = true;
-    log('   日频档案待追加 ' + todayStr + '（累计 ' + daily.dates.length + ' 天）');
-  } else log('   日频档案已有 ' + todayStr + '，跳过');
+    log('   日频档案待追加 ' + dataDay + '（累计 ' + daily.dates.length + ' 天）');
+  } else log('   日频档案已有 ' + dataDay + '，跳过');
 
   /* 本季至今净申购（当日份额 vs 上季末定期报告份额） */
   const qNetShares = +(snapTotalShares - qLast.shares).toFixed(1);
@@ -237,7 +262,7 @@ const dstr = ts => { const d = new Date(ts); return d.getFullYear() + '-' + Stri
   const dayTotVal = daily.dates.map((dd, i) => {
     let s = 0; codesAll.forEach(c => { const v = (daily.val[c] || [])[i]; if (v != null) s += v; }); return s;
   });
-  const curMonth = todayStr.slice(0, 7);
+  const curMonth = dataDay.slice(0, 7);
   const monthLast = {};                                   /* m → 该月最后一个快照索引 */
   daily.dates.forEach((dd, i) => { monthLast[dd.slice(0, 7)] = i; });
   const monthly = [];
@@ -266,7 +291,7 @@ const dstr = ts => { const d = new Date(ts); return d.getFullYear() + '-' + Stri
      故 1-4 月锚定为上年三季报（年报尚未披露完，避免取空）。 */
   const REPORT_PERIODS = (function (n) {
     const names = ['一季报', '中报', '三季报', '年报'];
-    let y = todayStr.slice(0, 4) | 0, m = todayStr.slice(5, 7) | 0, qs;
+    let y = dataDay.slice(0, 4) | 0, m = dataDay.slice(5, 7) | 0, qs;
     if (m >= 11) qs = 2;
     else if (m >= 9) qs = 1;
     else if (m >= 5) qs = 0;
@@ -394,7 +419,7 @@ const dstr = ts => { const d = new Date(ts); return d.getFullYear() + '-' + Stri
       directPct: +(directTotal / mktCap * 100).toFixed(2)
     },
     live: {
-      asOf: todayStr, basketShares: +snapTotalShares.toFixed(1),
+      asOf: dataDay, basketShares: +snapTotalShares.toFixed(1),
       anchorEnd: qLast.endDate, anchorShares: qLast.shares,
       netShares: qNetShares, netVal: qNetVal
     },
@@ -417,7 +442,7 @@ const dstr = ts => { const d = new Date(ts); return d.getFullYear() + '-' + Stri
   log('✅ ' + OUT + ' (' + (fs.statSync(OUT).size / 1024).toFixed(1) + ' KB)');
   if (dailyDirty) {
     fs.writeFileSync(DAILY, JSON.stringify(daily));
-    log('✅ ' + DAILY + ' 追加 ' + todayStr + '（累计 ' + daily.dates.length + ' 天）');
+    log('✅ ' + DAILY + ' 追加 ' + dataDay + '（累计 ' + daily.dates.length + ' 天）');
   }
   log('   方向: ' + dir + '（本季至今 ' + (qNetVal > 0 ? '+' : '') + qNetVal + ' 亿）；宽基篮子 ' + snapTotalVal.toFixed(0) + ' 亿占总市值 ' + out.kpi.basketPct + '%；直接持股 ' + directTotal.toFixed(0) + ' 亿占 ' + out.kpi.directPct + '%');
 })().catch(e => { console.error('❌', e); process.exit(1); });

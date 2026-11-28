@@ -1,0 +1,75 @@
+name: leverage-history-daily
+
+# 杠杆周期复盘页数据日更（2026-11-28 根治新增）
+# 原页面是手工生成的静态内嵌 JSON，无云端链路，数据停更即无人知晓。
+# 本 workflow 每交易日收盘后重算 leverage-history.json 提交回仓；
+# 页面运行时优先拉云端 JSON，内嵌数据仅作离线兜底。
+#
+# cron UTC 14:35 = 北京 22:35（错开 nt-trbond 的 22:10 / margin-risk 的 20:xx）
+# GitHub Actions 高负载时可能延迟到次日凌晨 ⇒ 脚本内不按自然日判定，
+# 一律用行情日（指数日K末日 + 两融末日）作为数据日期，延迟也不写错。
+on:
+  schedule:
+    - cron: '35 14 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: leverage-history-daily
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Preflight 数据源连通性
+        continue-on-error: true
+        run: |
+          for u in \
+            "https://ifzq.gtimg.cn/appstock/app/kline/kline?param=sh000001,day,,,5" \
+            "https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPTA_RZRQ_LSHJ&pageSize=1" ; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -A 'Mozilla/5.0' "$u" 2>/dev/null || echo ERR)
+            echo "$code  <-  $u"
+          done
+
+      - name: Build 杠杆周期数据
+        run: node leverage-history.js
+
+      # 存档新鲜度硬校验：指数日K末日落后今天 >4 自然日即失败（周末/节假日容错），
+      # 防止数据源静默冻结导致写入陈旧档案还显示成功。
+      - name: Check freshness
+        run: |
+          node -e '
+            const fs=require("fs");
+            const d=JSON.parse(fs.readFileSync("leverage-history.json","utf8"));
+            const day=d.current.date, t=new Date();
+            const age=(t-new Date(day+"T00:00:00Z"))/864e5;
+            console.log("指数末日",day,"距今天",age.toFixed(1),"天");
+            if(age>4){console.error("FAIL: 数据陈旧");process.exit(1)}
+          '
+
+      - name: Commit data
+        run: |
+          git add leverage-history.json
+          if ! git diff --cached --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: update leverage-history [skip ci]"
+            git pull --rebase --autostash origin ${GITHUB_REF_NAME} || true
+            git push || (sleep 5 && git pull --rebase --autostash origin ${GITHUB_REF_NAME} && git push)
+          else
+            echo "数据无变化"
+          fi
+
+      - name: Purge jsDelivr cache
+        run: |
+          curl -sS --max-time 20 "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@${GITHUB_REF_NAME}/leverage-history.json" || true
+          echo "purged leverage-history.json"

@@ -62,6 +62,25 @@ jobs:
       - name: Build 股债相对强弱 (tr-bond-data.json)
         run: node tr-bond-build.js
 
+      # ★2026-11-28 根治新增：存档新鲜度硬校验。
+      # 此前 workflow 连续三天全绿但档案停在 11-24（cron 延迟到次日凌晨被自然日闸门跳过），
+      # 无任何步骤发现异常。这里按「行情数据日」校验 nt-daily 末日：落后 qDate >1 天即 FAIL，
+      # 让静默停更变成显式红灯（配合 check-freshness.js 的 fail 语义）。
+      - name: Verify 国家队档案新鲜度
+        run: |
+          node -e '
+            const fs=require("fs");
+            const d=JSON.parse(fs.readFileSync("nt-daily.json","utf8"));
+            const last=d.dates[d.dates.length-1];
+            const TD=require("./trade-day.js");
+            TD.gate().then(g=>{
+              const q=g.qDate?g.qDate.slice(0,4)+"-"+g.qDate.slice(4,6)+"-"+g.qDate.slice(6,8):null;
+              const age=q?(new Date(q)-new Date(last))/864e5:0;
+              console.log("档案末日",last,"行情日",q,"落后",age.toFixed(0),"天");
+              if(q&&age>1){console.error("FAIL: 国家队档案落后行情日 >1 天");process.exit(1)}
+            }).catch(e=>{console.log("⚠ 行情日不可判定，跳过新鲜度硬校验:",e.message)});
+          '
+
       - name: Commit data
         run: |
           git add nt-data.json nt-daily.json tr-bond-data.json
