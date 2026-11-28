@@ -52,6 +52,18 @@ jobs:
             node nt-trend-build.js --full
           fi
 
+      # 国家队 ETF 篮子 → 行业板块隐含敞口（穿透估算，非官方披露）
+      - name: Build 板块敞口
+        run: |
+          node nt-sector-build.js
+          node -e '
+            const fs=require("fs");
+            const d=JSON.parse(fs.readFileSync("nt-sector.json","utf8"));
+            console.log("板块敞口", d.meta.asOf, "板块数", d.boards.length, "合计", d.boards.reduce((s,b)=>s+b.pct,0).toFixed(1)+"%");
+            if(!(d.boards.length>50)){console.error("FAIL: 板块数不足");process.exit(1)}
+            if(d.meta.asOf!==JSON.parse(fs.readFileSync("nt-trend.json","utf8")).meta.asOf){console.error("FAIL: 板块敞口与份额数据日期不一致");process.exit(1)}
+          '
+
       # 新鲜度硬校验：数据末日落后今天 >5 自然日即失败（覆盖周末 + 单日节假日），
       # 防止交易所接口静默冻结、写入陈旧档案还显示绿色成功。
       - name: Check freshness
@@ -69,11 +81,11 @@ jobs:
 
       - name: Commit data
         run: |
-          git add nt-trend.json
+          git add nt-trend.json nt-sector.json
           if ! git diff --cached --quiet; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "chore: update nt-trend [skip ci]"
+            git commit -m "chore: update nt-trend + nt-sector [skip ci]"
             git pull --rebase --autostash origin ${GITHUB_REF_NAME} || true
             git push || (sleep 5 && git pull --rebase --autostash origin ${GITHUB_REF_NAME} && git push)
           else
@@ -82,5 +94,7 @@ jobs:
 
       - name: Purge jsDelivr cache
         run: |
-          curl -sS --max-time 20 "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@${GITHUB_REF_NAME}/nt-trend.json" || true
-          echo "purged nt-trend.json"
+          for f in nt-trend.json nt-sector.json; do
+            curl -sS --max-time 20 "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@${GITHUB_REF_NAME}/$f" || true
+            echo "purged $f"
+          done
