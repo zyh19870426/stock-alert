@@ -34,8 +34,22 @@ jobs:
         with:
           node-version: '22'
 
+      # ★2026-11-28 根治：东财 push2 出口偶发整体不可达（11-25/26/27 连续三天
+      #   clist 六通道 fetch failed，页面停更 11-24）。重跑 #39 立即成功 ⇒ 是网络抖动
+      #   而非代码错误。加 run 内重试：最多 3 次、间隔 30s，让偶发抖动自愈；
+      #   3 次全败仍非 0 退出、后面 freshness 硬校验照常报红，绝不静默放行。
       - name: Update sector fund-flow archive
-        run: node flow-daily.js
+        run: |
+          for i in 1 2 3; do
+            echo "=== 资金流生成 第 $i/3 次 ==="
+            if node flow-daily.js; then
+              echo "✅ 第 $i 次成功"
+              exit 0
+            fi
+            if [ "$i" -lt 3 ]; then echo "⚠ 第 $i 次失败，30s 后重试"; sleep 30; fi
+          done
+          echo "❌ 3 次均失败，报红（不提交、保留上一版好数据）"
+          exit 1
 
       - name: Commit archive
         run: |
