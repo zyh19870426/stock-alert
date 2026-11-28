@@ -30,7 +30,7 @@ const BOND_FUNDS = [
   ['110017', '易方达增强回报债券A']
 ];
 
-function get(url, ref, timeout) {
+function getOnce(url, ref, timeout) {
   return new Promise((res, rej) => {
     const q = https.get(url, {
       timeout: timeout || 30000,
@@ -46,6 +46,20 @@ function get(url, ref, timeout) {
     q.on('error', rej);
     q.on('timeout', () => { q.destroy(); rej(new Error('timeout')); });
   });
+}
+/* ★2026-11-28 根治：中证官网海外出口偶发 30s 超时（run #13 卡在①直接 FAIL，
+   连带国家队 nt-data 已生成却无法提交）。带退避重试 3 次，偶发抖动自愈；
+   3 次全败仍抛错 fail-fast，不静默放行。 */
+async function get(url, ref, timeout) {
+  let last = null;
+  for (let i = 1; i <= 3; i++) {
+    try { return await getOnce(url, ref, timeout); }
+    catch (e) {
+      last = e;
+      if (i < 3) await new Promise(r => setTimeout(r, 2000 * i));
+    }
+  }
+  throw last;
 }
 
 function extractArr(body, key) {
