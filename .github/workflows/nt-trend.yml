@@ -1,0 +1,86 @@
+name: nt-trend-daily
+
+# 国家队份额趋势 × 上证指数 —— 数据日更（2026-11-28 新增）
+#
+# 产出 nt-trend.json：沪市 8 只宽基 ETF 逐日份额（上交所官方披露）+ 上证指数/ETF 收盘价，
+# 首页「恐贪指数」下方的趋势图与 nt-trend.html 详情页都运行时拉这份 JSON。
+#
+# 时点：份额是 T 日盘后披露（一般当晚才齐），所以排在所有任务最后 ——
+#   UTC 15:10 = 北京 23:10（错开 nt-trbond 22:10 / leverage 22:35 / margin 20:xx）。
+#   不按自然日判定，一律以数据自身的日期（asOf）为准，CI 延迟到次日也不会写错。
+on:
+  schedule:
+    - cron: '10 15 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nt-trend-daily
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Preflight 数据源连通性
+        continue-on-error: true
+        run: |
+          for u in \
+            "https://query.sse.com.cn/commonQuery.do?sqlId=COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L&isPagination=true&pageHelp.pageSize=5&pageHelp.pageNo=1&STAT_DATE=2026-11-27" \
+            "https://quotes.sina.cn/cn/api/jsonp_v2.php/var%20_x=/CN_MarketDataService.getKLineData?symbol=sh000001&scale=240&ma=no&datalen=5" \
+            "https://ifzq.gtimg.cn/appstock/app/kline/kline?param=sh000001,day,,,5" ; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -A 'Mozilla/5.0' \
+              -H 'Referer: http://www.sse.com.cn/' "$u" 2>/dev/null || echo ERR)
+            echo "$code  <-  ${u:0:90}"
+          done
+
+      # 首次运行（仓库里还没有 nt-trend.json）走全量建库；之后每次只补缺失日 + 重拉最近 10 日
+      - name: Build 份额趋势
+        run: |
+          if [ -f nt-trend.json ]; then
+            node nt-trend-build.js
+          else
+            echo "仓库内无历史档案，走全量建库"
+            node nt-trend-build.js --full
+          fi
+
+      # 新鲜度硬校验：数据末日落后今天 >5 自然日即失败（覆盖周末 + 单日节假日），
+      # 防止交易所接口静默冻结、写入陈旧档案还显示绿色成功。
+      - name: Check freshness
+        run: |
+          node -e '
+            const fs=require("fs");
+            const d=JSON.parse(fs.readFileSync("nt-trend.json","utf8"));
+            const asOf=d.meta.asOf, n=d.dates.length;
+            const age=(Date.now()-new Date(asOf+"T00:00:00Z"))/864e5;
+            console.log("数据末日", asOf, "| 交易日数", n, "| 距今天", age.toFixed(1), "天");
+            console.log("末日篮子份额", d.basket.shares[n-1], "亿份 | 当日净申赎", d.basket.flow[n-1], "亿");
+            if(!(n>200)){console.error("FAIL: 历史长度不足 "+n);process.exit(1)}
+            if(age>5){console.error("FAIL: 数据陈旧，交易所份额可能未披露");process.exit(1)}
+          '
+
+      - name: Commit data
+        run: |
+          git add nt-trend.json
+          if ! git diff --cached --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: update nt-trend [skip ci]"
+            git pull --rebase --autostash origin ${GITHUB_REF_NAME} || true
+            git push || (sleep 5 && git pull --rebase --autostash origin ${GITHUB_REF_NAME} && git push)
+          else
+            echo "数据无变化"
+          fi
+
+      - name: Purge jsDelivr cache
+        run: |
+          curl -sS --max-time 20 "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@${GITHUB_REF_NAME}/nt-trend.json" || true
+          echo "purged nt-trend.json"
